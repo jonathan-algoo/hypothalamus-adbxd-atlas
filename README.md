@@ -1,4 +1,4 @@
-This repository contains code for the hypothalamus AD-BXD project, where we characterized changes to a genetically diverse Alzheimer's model (the AD-BXDs) within the hypothalamus; several associations were conserved in analysis of human AD patients vs controls. 
+This repository contains code for the hypothalamus AD-BXD project, where we characterized changes to a genetically diverse Alzheimer's model (the AD-BXDs) within the hypothalamus; several associations replicated in analysis of human AD patients vs controls. 
 
 The structure of the code is organized by: 1) prepro/QC/clustering/atlas creation 2) shared analyses relevant to multiple figures; or 3) analyses that are only relevant to one figure. 
 
