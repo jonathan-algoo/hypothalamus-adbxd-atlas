@@ -1,0 +1,244 @@
+---
+title: "hypoad and tsai mb dataset integration"
+output: html_document
+date: "2026-08-10"
+---
+
+Select mb samples from hypoad and all samples from tsai mb dataset
+```{r setup}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+library(harmony)
+```
+
+Select hypoad mb 
+```{r}
+hypoad_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+cell_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+
+rna_and_pmi_info = read_csv("./hypoad_prepro/rna and pmi donor info.csv")
+rna_and_pmi_info = rna_and_pmi_info[1:14,]
+rna_and_pmi_info$pmi_hours_format= rna_and_pmi_info$pmi_hours_format %>% as.character()
+#from stack overflow
+rna_and_pmi_info$pmi_hours_decimal = 
+sapply(strsplit(rna_and_pmi_info$pmi_hours_format,":"),
+  function(x) {
+    x <- as.numeric(x)
+    x[1]+x[2]/60
+    }
+)
+rna_and_pmi_info$pmi_hours_decimal = rna_and_pmi_info$pmi_hours_decimal %>% scale()
+rna_and_pmi_info$rna_integrity_score = rna_and_pmi_info$rna_integrity_score %>% scale
+#copy donor metadata from table 2 
+cell_meta$pmi_hours = rna_and_pmi_info$pmi_hours_decimal[match(cell_meta$donor_id,rna_and_pmi_info$cell_meta_id)] 
+cell_meta$rna_integrity_score = rna_and_pmi_info$rna_integrity_score[match(cell_meta$donor_id,rna_and_pmi_info$cell_meta_id)]
+hypoad_cell_meta_mb = cell_meta %>% filter(is_primary_data) %>% filter(dissection == "MM")
+hypoad_ge_mb = hypoad_ge[,rownames(hypoad_cell_meta_mb)]
+```
+
+
+Setup mb dataset and perform qc
+```{r}
+library(tidyverse)
+library(BPCells)
+
+mb_counts_df = readRDS("./rosmap_mb_prepro/doublet and initial cell types pre qc.rds")
+singlet_cells = mb_counts_df %>% filter(scDblFinder_class == "singlet")
+mb_counts = open_matrix_dir("./rosmap_mb_prepro/decontx_counts/")
+mb_counts = mb_counts[,singlet_cells$cell_id]
+
+reads_per_cell <- Matrix::colSums(mb_counts)
+genes_expressed_per_cell = Matrix::colSums(mb_counts > 0)
+qc_df <- data.frame(umis = reads_per_cell, genes_detected = genes_expressed_per_cell)
+
+# Identify mitochondrial genes (human convention)
+mt_genes <- grep("^MT-", rownames(mb_counts), value = TRUE)
+
+# Percent of each cell's UMIs coming from mito genes
+qc_df$pct_mito <- 100 * Matrix::colSums(mb_counts[mt_genes, , drop = FALSE]) / qc_df$umis
+library(ggplot2)
+qc_pass <- qc_df$umis >= 2000 &
+           qc_df$umis <= 1e5 & #catch any remaining multiplets (sequenced high, but prob not necessary)
+           qc_df$genes_detected >= 500 &
+           qc_df$pct_mito <= 5
+
+cat("Cells before QC:", nrow(qc_df), "\n")
+cat("Cells passing QC:", sum(qc_pass),
+    sprintf("(%.1f%%)\n", 100 * mean(qc_pass)))
+
+
+
+mb_counts <- mb_counts[, qc_pass]
+meta_mb_tsai = singlet_cells[match(colnames(mb_counts),singlet_cells$cell_id),]
+```
+
+Integrated clustering using shared genes
+```{r}
+
+shared_genes = intersect(rownames(mb_counts),rownames(hypoad_ge_mb))
+mb_counts = mb_counts[shared_genes,]
+hypoad_ge_mb = hypoad_ge_mb[shared_genes,]
+
+meta_mb_tsai = meta_mb_tsai %>% select(cell_id, sample)
+meta_mb_tsai$dataset = "tsai"
+hypoad_cell_meta_mb = hypoad_cell_meta_mb %>% rownames_to_column("cell_id") %>% rename("sample" = "donor_id")
+hypoad_cell_meta_mb = hypoad_cell_meta_mb %>% select(cell_id, sample)
+hypoad_cell_meta_mb$dataset = "hypoad"
+combined_meta = bind_rows(meta_mb_tsai,hypoad_cell_meta_mb)
+combined_ge = cbind(mb_counts,hypoad_ge_mb)
+```
+
+
+
+Combine and integrate, account for batch effects through harmony after principal components identification
+```{r}
+get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate 30 PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+pcs_all = get_pcs_from_initial_dataset(combined_ge)
+
+#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
+harmony_all = RunHarmony(pcs_all,meta_data = combined_meta$dataset)
+
+```
+
+
+```{r}
+create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
+  hnsw_index <- RcppHNSW::hnsw_build(
+    X = pc_coords,
+    ef = ef_index_build_param,
+    M = M_index_build_param,
+    distance = distance_metric,
+    n_threads = n_threads
+  )
+  nn_index <- RcppHNSW::hnsw_search(
+    X = pc_coords,
+    ann = hnsw_index,
+    k = knns_returned,
+    ef = 200,
+    n_threads = n_threads
+  )
+  
+  #convert to snn index
+  
+  #add cell ids as field
+  rownames(nn_index$idx) = rownames(pc_coords)
+  rownames(nn_index$dist) = rownames(pc_coords)
+  
+  #convert to snn graph via knn_to_snn function
+  snn_graph = knn_to_snn_graph(nn_index)
+  rownames(snn_graph) = rownames(nn_index$idx)
+  colnames(snn_graph) = rownames(nn_index$idx)
+  return(snn_graph)
+}
+
+
+
+#adapted from bpcells function
+get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  #dendro stuff start
+  
+  
+  #dendro stuff end
+  leiden_communities_found %>% 
+    igraph::membership() %>%
+    as.factor()
+}
+
+#adapted from bpcells function
+subcluster_assignments_and_modularity_score  = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  modularity_score = leiden_communities_found$quality
+  cluster_assignments = leiden_communities_found$membership
+  names(cluster_assignments) = leiden_communities_found$names
+  
+  list(modularity_score = modularity_score, new_assignments = cluster_assignments)
+}
+
+subcluster_cells_harmony = function(harmony_pcs, cur_cluster_name, modularity_threshold = .8, leiden_resolution = .1) {
+  results_list = list()
+  snn_graph = create_snn_graph_from_pcs(harmony_pcs)
+  mod_score_and_assignments = subcluster_assignments_and_modularity_score(snn_graph, resolution = leiden_resolution)
+  results_list$modularity_score = mod_score_and_assignments$modularity_score
+  num_new_clusters = length(mod_score_and_assignments$new_assignments %>% unique())
+  if (mod_score_and_assignments$modularity_score > modularity_threshold & num_new_clusters > 1) {
+      results_list$successful = T
+      results_list$new_assignments = paste0(cur_cluster_name,"-",mod_score_and_assignments$new_assignments)
+      names(results_list$new_assignments) = names(mod_score_and_assignments$new_assignments)
+      results_list$pcs = harmony_pcs
+      results_list$snn_graph = snn_graph
+  } else{
+    results_list$successful = F
+    results_list$new_assignments = NA
+  }
+  return(results_list)
+}
+
+get_lognorm_markers = function(cluster_assignments, non_norm_ge) {
+  assignments = cluster_assignments$new_assignments
+  non_norm_ge = non_norm_ge[,names(assignments)]
+  #log norm
+  non_norm_ge = multiply_cols(non_norm_ge, 1/Matrix::colSums(non_norm_ge))
+  non_norm_ge <- log1p(non_norm_ge * 1e6) # Log cpm
+  
+  #get markers
+  markers_per_clust = marker_features(mat = non_norm_ge, assignments)
+  markers_per_clust = markers_per_clust %>% mutate(l2fc = (foreground_mean - background_mean)/log(2))
+  markers_per_clust = markers_per_clust %>% mutate(cpm_expression = 100*(2^foreground_mean - 1))
+
+  markers_per_clust
+}
+
+cell_classes = subcluster_cells_harmony(harmony_pcs = harmony_all,cur_cluster_name = "broadclass", leiden_resolution = .01)
+
+saveRDS(cell_classes, "broad_cell_classes_integrated_dset.rds")
+
+
+broad_markers = get_lognorm_markers(cluster_assignments = cell_classes, non_norm_ge = combined_ge)
+```
+1 - neuron
+2 - oligo
+3 - astrocyte
+4 - opc
+5 - neuron
+6 - microglia
+7 - vascular
+8 - singlet

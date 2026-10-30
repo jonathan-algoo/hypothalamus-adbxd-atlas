@@ -1,0 +1,346 @@
+---
+title: "astrocyte_gsea"
+output: html_document
+date: "2026-03-31"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+set.seed(1)
+```
+
+```{r}
+gls_results = readRDS("gsea_results_gls_astrocytes.rds")
+#statistically significant gls astrocyte pathways across comparisons
+gls_results_sig = gls_results %>% filter(p.adjust < 0.05)
+#write to csv (supplementary table 4)
+write_csv(gls_results_sig,"gls_astrocytes_gsea_results_sig.csv")
+```
+
+5X vs Ntg 14 month plots immune
+```{r}
+#manually went through and labeled significant immune pathways across all 5x vs ntg comparisons, found only these immune ones, and only in females were they detectable
+all_immune_pathways_sig = c("complement activation, classical pathway", "humoral immune response mediated by circulating immunoglobulin", "response to interferon-beta", "antigen processing and presentation of endogenous antigen", "antigen processing and presentation of endogenous peptide antigen", "antigen processing and presentation of endogenous peptide antigen via MHC class I", "antigen processing and presentation of peptide antigen via MHC class I", "antigen processing and presentation of peptide antigen", "antigen processing and presentation via MHC class Ib")
+
+# Add males same comparison 
+immune_comparisons_both_sexes = gls_results %>% filter(contrast %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f","early_amyloid_contrast_m", "early_amyloid_contrast_f")) %>% filter(Description %in% all_immune_pathways_sig)
+
+immune_comparisons_both_sexes$sig_label = case_when(
+  immune_comparisons_both_sexes$p.adjust < 0.001 ~ "***",
+  immune_comparisons_both_sexes$p.adjust < 0.01 ~ "**",
+  immune_comparisons_both_sexes$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+
+
+
+immune_comparisons_both_sexes$Description = str_to_title(immune_comparisons_both_sexes$Description)
+
+#for plot change contrast name
+immune_comparisons_both_sexes = immune_comparisons_both_sexes %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    .default = contrast
+  )
+)
+
+
+
+immune_pathways_5x_14_mo_plot <- ggplot(immune_comparisons_both_sexes, aes(x = contrast, y = Description, fill = NES)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  # Diverging Red-Blue palette for NES (Normalized Enrichment Score)
+  scale_fill_distiller(
+    palette = "RdBu", 
+    direction = -1, 
+    limit = c(-max(abs(immune_comparisons_both_sexes$NES)), 
+              max(abs(immune_comparisons_both_sexes$NES))),
+    name = "NES"
+  ) +
+  labs(
+    x = "", 
+    y = "") +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) + #wrap text to new line after 20 characters
+    scale_x_discrete(labels = function(x) str_wrap(x, width = 50)) + #wrap text to new line after 20 characters
+  theme_minimal(base_family = "Helvetica",base_size = 19) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1, face = "bold",color = "black"),     axis.text.y = element_text(face = "bold",color = "black"),
+    axis.title = element_text(face = "bold",size = 25),
+    panel.grid = element_blank(),
+    legend.text = element_text(size = 15, face = "bold"),
+    legend.title = element_text(size = 17, face = "bold"),
+    legend.key.size = unit(.8, "cm"),
+    plot.title = element_text(face = "bold", size = 20,hjust=1),
+    strip.text = element_text(face = "bold")
+  )
+
+
+ggsave("immune_pathways_5x_14_mo_plot.pdf",immune_pathways_5x_14_mo_plot, width = 8.5, height = 10.3)
+```
+
+Plot showing the relative position of these immune signatures for female 5x relative to all other sig pathways for this group
+```{r}
+# ── Immune pathways NES strip plot: 14 Mo 5X vs Ntg Females only ─────────────
+
+plot_df <- gls_results %>%
+  filter(contrast == "prolonged_amyloid_contrast_f") %>%
+  mutate(is_immune = Description %in% all_immune_pathways_sig)
+
+bg_sig <- plot_df %>% filter(!is_immune, p.adjust < 0.05)
+fg_sig <- plot_df %>% filter(is_immune, p.adjust < 0.05)
+
+set.seed(42)
+
+immune_strip_plot <- ggplot(plot_df, aes(x = NES, y = 1)) +
+  geom_vline(xintercept = 0, color = "grey30", linewidth = 0.5) +
+  geom_jitter(data = bg_sig,
+              aes(color = "Other FDR < 0.05 pathway"),
+              height = 0.05, width = 0, size = 1.2, alpha = 0.35) +
+  geom_jitter(data = fg_sig,
+              aes(fill = "Immune pathway"),
+              height = 0.05, width = 0, size = 1.5, alpha = 0.95, color = "#C0392B", stroke = 0.5) +
+  scale_color_manual(values = c("Other FDR < 0.05 pathway" = "grey65"), name = NULL) +
+  scale_fill_manual(values = c("Immune pathway" = "#C0392B"), name = NULL) +
+  guides(
+    color = guide_legend(override.aes = list(size = 3, alpha = 0.6)),
+    fill  = guide_legend(override.aes = list(size = 3, alpha = 0.95))
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.05)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = "NES", y = NULL) +
+  theme_minimal(base_family = "Helvetica", base_size = 12) +
+  theme(
+    axis.text.x        = element_text(face = "bold", color = "black", size = 10),
+    axis.text.y        = element_blank(),
+    axis.title.x       = element_text(face = "bold", size = 13),
+    axis.title.y       = element_blank(),
+    panel.grid.major.x = element_line(color = "grey90"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "bottom",
+    legend.text        = element_text(size = 10)
+  )
+
+ggsave("immune_pathways_female_14mo_nes_strip.pdf", immune_strip_plot,
+       width = 5, height = 2)
+```
+
+
+
+Aging Plots for Ntg and 5X
+```{r}
+#immune pathways upregulated in aging (w/ and w/o transgene and sig in either M or F)
+aging_w_and_wo_transgene_immune_pathways_sig = c("defense response to symbiont", "response to interferon-beta", "defense response to virus", "cellular response to interferon-beta", "innate immune response", "regulation of innate immune response", "humoral immune response", "antigen processing and presentation of peptide antigen", "cell killing", "antigen processing and presentation of peptide antigen via MHC class I", "complement activation")
+
+immune_transport_comparisons_aging = gls_results %>% filter(grepl("aging|late_vs_early",contrast)) %>% filter(Description %in% aging_w_and_wo_transgene_immune_pathways_sig)
+
+immune_transport_comparisons_aging$sig_label = case_when(
+  immune_transport_comparisons_aging$p.adjust < 0.001 ~ "***",
+  immune_transport_comparisons_aging$p.adjust < 0.01 ~ "**",
+  immune_transport_comparisons_aging$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+
+
+immune_transport_comparisons_aging = immune_transport_comparisons_aging %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    .default = contrast
+  )
+)
+
+immune_transport_comparisons_aging$Description = str_to_title(immune_transport_comparisons_aging$Description)
+
+sig_5x_pathways_aging <- immune_transport_comparisons_aging %>%
+  filter(p.adjust < .05, contrast == "14 Month 5X vs 6 Month 5X F")
+
+sig_ntg_pathways_aging <- immune_transport_comparisons_aging %>%
+  filter(p.adjust < .05, contrast == "14 Month Ntg vs 6 Month Ntg F")
+
+order_pathways <- c(sig_5x_pathways_aging$Description,
+                    sig_ntg_pathways_aging$Description) %>%
+  unique()
+
+immune_transport_comparisons_aging$Description <- factor(
+  immune_transport_comparisons_aging$Description,
+  levels = order_pathways
+)
+
+
+
+immune_pathways_aging_plot <- ggplot(immune_transport_comparisons_aging, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  # Diverging Red-Blue palette for NES (Normalized Enrichment Score)
+  scale_fill_distiller(
+    palette = "RdBu", 
+    direction = -1, 
+    limit = c(-max(abs(immune_transport_comparisons_aging$NES)), 
+              max(abs(immune_transport_comparisons_aging$NES))),
+    name = "NES"
+  ) +
+  labs(
+    x = "", 
+    y = "", 
+  ) +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) + #wrap text to new line after 20 characters
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20)) + #wrap text to new line after 20 characters
+  theme_minimal(base_family = "Helvetica",base_size = 20) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1, face = "bold",color = "black"),     axis.text.y = element_text(face = "bold",color = "black"),
+    axis.title = element_text(face = "bold",size = 25),
+    panel.grid = element_blank(),
+    legend.text = element_text(size = 15, face = "bold"),
+    legend.title = element_text(size = 17, face = "bold"),
+    legend.key.size = unit(.8, "cm"),
+    plot.title = element_text(face = "bold", size = 20,hjust=1),
+    strip.text = element_text(face = "bold")
+  )
+
+ggsave("immune_pathways_aging_plot.pdf",immune_pathways_aging_plot, width = 9, height = 13)
+```
+
+5X vs Ntg Ion and Calcium Plots 14 month plots
+```{r}
+ion_pathways = c("calcium ion import across plasma membrane", "calcium ion import into cytosol", "calcium-ion regulated exocytosis", "calcium ion-regulated exocytosis of neurotransmitter", "inorganic cation import across plasma membrane", "inorganic ion import across plasma membrane","regulation of calcium ion-dependent exocytosis")
+
+ion_transport_5x <- gls_results %>%
+  filter(contrast %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f","early_amyloid_contrast_m","early_amyloid_contrast_f")) %>% 
+  filter(Description %in% ion_pathways) %>% 
+  filter(p.adjust < .05)
+```
+
+
+
+
+```{r}
+# Add males same comparison 
+ion_transport_comparisons_both_sexes = gls_results %>% filter(contrast %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f","early_amyloid_contrast_m", "early_amyloid_contrast_f")) %>% filter(Description %in% ion_pathways)
+
+ion_transport_comparisons_both_sexes$sig_label = case_when(
+  ion_transport_comparisons_both_sexes$p.adjust < 0.001 ~ "***",
+  ion_transport_comparisons_both_sexes$p.adjust < 0.01 ~ "**",
+  ion_transport_comparisons_both_sexes$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+
+
+
+ion_transport_comparisons_both_sexes$Description = str_to_title(ion_transport_comparisons_both_sexes$Description)
+
+#for plot change contrast name
+ion_transport_comparisons_both_sexes = ion_transport_comparisons_both_sexes %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    .default = contrast
+  )
+)
+
+
+
+ion_pathways_5x_14_mo_plot <- ggplot(ion_transport_comparisons_both_sexes, aes(x = contrast, y = Description, fill = NES)) +
+    geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  # Diverging Red-Blue palette for NES (Normalized Enrichment Score)
+  scale_fill_distiller(
+    palette = "RdBu", 
+    direction = -1, 
+    limit = c(-max(abs(ion_transport_comparisons_both_sexes$NES)), 
+              max(abs(ion_transport_comparisons_both_sexes$NES))),
+    name = "NES"
+  ) +
+  labs(
+    x = "", 
+    y = "") +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) + #wrap text to new line after 20 characters
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 20)) + #wrap text to new line after 20 characters
+  theme_minimal(base_family = "Helvetica",base_size = 20) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1.2, hjust = 1, face = "bold",color = "black"),     axis.text.y = element_text(face = "bold",color = "black"),
+    axis.title = element_text(face = "bold",size = 25),
+    panel.grid = element_blank(),
+    legend.text = element_text(size = 15, face = "bold"),
+    legend.title = element_text(size = 17, face = "bold"),
+    legend.key.size = unit(.8, "cm"),
+    plot.title = element_text(face = "bold", size = 20,hjust=1),
+    strip.text = element_text(face = "bold")
+  )
+
+
+ggsave("ion_pathways_5x_14_mo_plot.pdf",ion_pathways_5x_14_mo_plot, width = 8, height = 10)
+```
+
+Strip plot of ion channel pathway changes (restricted to males)
+```{r}
+# ── Ion transport NES strip plot: 14 Mo 5X vs Ntg Males only ─────────────────
+
+plot_df <- gls_results %>%
+  filter(contrast == "prolonged_amyloid_contrast_m") %>%
+  mutate(is_ion = Description %in% ion_pathways)
+
+bg_sig <- plot_df %>% filter(!is_ion, p.adjust < 0.05)
+fg_sig <- plot_df %>% filter(is_ion, p.adjust < 0.05)
+
+set.seed(42)
+
+ion_strip_plot_m <- ggplot(plot_df, aes(x = NES, y = 1)) +
+  geom_vline(xintercept = 0, color = "grey30", linewidth = 0.5) +
+  geom_jitter(data = bg_sig, 
+              aes(color = "Other FDR < 0.05 pathway"),
+              height = 0.05, width = 0, size = 1.2, alpha = 0.35) +
+  geom_jitter(data = fg_sig,
+              aes(fill = "Ion / Calcium transport"),
+              height = 0.05, width = 0, size = 1.5, alpha = 0.95, color = "#C0392B", stroke = 0.5) +
+  scale_color_manual(values = c("Other FDR < 0.05 pathway" = "grey65"), name = NULL) +
+  scale_fill_manual(values = c("Ion / Calcium transport" = "#C0392B"), name = NULL) +
+  guides(
+    color = guide_legend(override.aes = list(size = 3, alpha = 0.6)),
+    fill  = guide_legend(override.aes = list(size = 3, alpha = 0.95))
+  ) +
+  scale_x_continuous(expand = expansion(mult = 0.05)) +
+  scale_y_continuous(breaks = NULL) +
+  labs(x = "NES", y = NULL) +
+  theme_minimal(base_family = "Helvetica", base_size = 12) +
+  theme(
+    axis.text.x        = element_text(face = "bold", color = "black", size = 10),
+    axis.text.y        = element_blank(),
+    axis.title.x       = element_text(face = "bold", size = 13),
+    axis.title.y       = element_blank(),
+    panel.grid.major.x = element_line(color = "grey90"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "bottom",
+    legend.text        = element_text(size = 10)
+  )
+
+ggsave("ion_pathways_male_14mo_strip.pdf", ion_strip_plot_m,
+       width = 5, height = 2)
+```
+

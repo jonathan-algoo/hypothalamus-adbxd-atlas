@@ -1,0 +1,100 @@
+ ---
+title: "mb_rosmap_analysis"
+output: html_document
+date: "2026-06-13"
+---
+
+
+
+```{r setup}
+set.seed(1)
+
+library(Seurat)
+library(Matrix)
+library(magrittr)
+
+library(BPCells)
+```
+
+```{r}
+library(Seurat)
+library(Matrix)
+library(magrittr)
+
+library(BPCells)
+parent_dir <- "./mb_neuron_human_rosmap_dataset/"
+
+## ---- 2. Find all run directories ----
+run_dirs <- list.dirs(parent_dir, recursive = FALSE, full.names = TRUE)
+names(run_dirs) <- basename(run_dirs)
+
+## ---- 3. Load each directory with ReadSTARsolo into a named list ----
+##   data.dir points straight at the folder holding matrix.mtx/barcodes.tsv/features.tsv
+mat_list <- lapply(run_dirs, function(d) ReadSTARsolo(data.dir = d))
+names(mat_list) <- names(run_dirs)
+
+## ---- 4. Pull the sample number (S#) out of each folder name ----
+extract_sample <- function(folder) {
+  parts <- strsplit(folder, "_", fixed = TRUE)[[1]]
+  s <- parts[grepl("^S[0-9]+$", parts)]      # matches the S3 token, not an S inside a name
+  if (length(s) == 0) NA_character_ else s[[1]]
+}
+sample_id <- vapply(names(mat_list), extract_sample, character(1))
+
+
+if (any(is.na(sample_id))) {
+  warning("No S# token found in: ",
+          paste(names(mat_list)[is.na(sample_id)], collapse = ", "))
+}
+
+
+## ---- 6. Group by sample number, sum within each group, and prefix cell names ----
+groups <- split(mat_list, sample_id)
+
+for(i in 1:length(groups)) {
+  cur_sample = names(groups)[i]
+  for(j in 1:length(groups[[cur_sample]])) {
+    cur_colnames = colnames(groups[[cur_sample]][[j]])
+    colnames_with_sample = paste0(cur_sample,"_",cur_colnames)
+    colnames(groups[[cur_sample]][[j]]) = colnames_with_sample
+  }
+}
+
+
+
+first = T
+for(i in 1:length(groups)) {
+  cur_sample = names(groups)[i]
+  for(j in 1:length(groups[[cur_sample]])) {
+    cur_sample_mat = groups[[cur_sample]][[j]] %>%  as("IterableMatrix")
+    if(first == T) {
+      bpcells_mat = cur_sample_mat
+      first = F
+    } else{
+      #cells profiled in both aggregate mat and cur mat 
+      shared_cells = intersect(cur_sample_mat %>% colnames, bpcells_mat %>% colnames) 
+      if(length(shared_cells) > 0) {
+        if(!all(rownames(cur_sample_mat) == rownames(bpcells_mat))) stop()
+      
+        combined_mat_shared_cells <- cur_sample_mat[, shared_cells] + bpcells_mat[, shared_cells]
+      
+        new_cells   <- setdiff(colnames(cur_sample_mat), shared_cells)  # only in this lane
+        other_cells <- setdiff(colnames(bpcells_mat),   shared_cells)   # already accumulated
+      
+        pieces <- list(combined_mat_shared_cells)
+        if(length(new_cells)   > 0) pieces <- c(pieces, list(cur_sample_mat[, new_cells]))
+        if(length(other_cells) > 0) pieces <- c(pieces, list(bpcells_mat[,  other_cells]))
+      
+        bpcells_mat <- if(length(pieces) == 1) pieces[[1]] else Reduce(cbind, pieces)
+      
+      } else {
+        bpcells_mat <- cbind(bpcells_mat, cur_sample_mat)
+      } 
+    }
+  }
+}
+
+
+write_matrix_dir(bpcells_mat,"combined_bpcells_mat")
+
+```

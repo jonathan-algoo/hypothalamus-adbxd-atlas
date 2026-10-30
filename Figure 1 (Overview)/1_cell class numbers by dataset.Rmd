@@ -1,0 +1,226 @@
+---
+title: "Cell class numbers across datasets"
+output: html_document
+date: "2025-03-31"
+---
+
+Last ran Feb 25, 2026
+
+Cell class numbers (glia and neurons, split by sex, and shown as a bar plot)
+
+Load libraries
+```{r setup}
+library(BPCells)
+library(sccomp)
+library(readxl)
+library(reticulate)
+library(SingleCellExperiment)
+library(zellkonverter)
+library(khroma)
+library(patchwork)
+library(tidyverse)
+```
+
+Get numbers for our dataset
+```{r}
+
+# Step 1: Load necessary libraries
+library(tidyverse)
+library(ggsankeyfier)
+library(BPCells)
+library(ggrepel)
+library(khroma)
+library(ggalluvial)
+
+# Load the final, post-QC matrix
+post_qc_and_clustering_mat <- open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+
+# Load cell cluster assignments
+neuronal_assignments <- readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+non_neuronal_assignments <- readRDS("../shared objs and code/non_neuronal_assignments.rds")
+
+# Combine all assignments into a single dataframe
+assignments_df <- data.frame(
+  cluster = c(neuronal_assignments, non_neuronal_assignments),
+  cell_id = c(names(neuronal_assignments), names(non_neuronal_assignments))
+)
+
+# Get the final number of cells that passed all filtering and clustering steps
+num_cells_after_qc_and_clustering <- nrow(assignments_df)
+
+# Load the conversion file for internal cluster IDs to official names
+df_internal_and_official_name <- read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+
+# ---
+# Step 3: Process and classify cell assignments
+# ---
+
+# Convert numeric neuronal cluster IDs to their official names
+assignments_df <- assignments_df %>%
+  mutate(cluster = case_when(
+    cluster %in% df_internal_and_official_name$numeric_id ~ df_internal_and_official_name$official_name[match(cluster, df_internal_and_official_name$numeric_id)],
+    .default = cluster # Keep non-neuronal names as they are
+  ))
+
+# Add a 'cell_class' column (e.g., "neuronal", "astrocyte", "microglia")
+assignments_df <- assignments_df %>%
+  mutate(cell_class = case_when(
+    cluster %in% df_internal_and_official_name$official_name ~ "neuronal",
+    .default = sub("[-_].*", "", cluster) # For non-neuronal, take the part before the first '-' or '_'
+  ))
+
+assignments_df$cell_class %>% unique
+
+```
+
+
+Get metadata from Hajdarovic, Yu, et al (2022)
+```{r}
+webb_mouse = readRDS("../shared objs and code/external mouse datasets/webb seurat obj.RDS")
+webb_mouse_meta = webb_mouse@meta.data
+webb_mouse_meta$sex = "Female"
+webb_mouse_meta$group %>% unique
+glia_classes = webb_mouse_meta$group
+  
+```
+
+Get meta from mouse hypomap Steuernagel, Lam et al (2022)
+```{r}
+# Use zellkonverter to read h5ad file
+mouse_hypomap_sce <- readH5AD("../shared objs and code/external mouse datasets/mouse hyopmap.h5ad",use_hdf5 = TRUE)
+# Extract metadata from SingleCellExperiment object
+mouse_hypomap_meta <- colData(mouse_hypomap_sce) %>% as.data.frame()
+
+```
+
+Remove Erythrocyte + Pituitary gland cells from hypomap
+```{r}
+mouse_hypomap_meta = mouse_hypomap_meta %>% filter(cell_type != "pituitary gland cell") %>% filter(cell_type != "erythrocyte") %>% droplevels()
+```
+
+
+Create cross-dataset annotation mapping
+```{r}
+# Define consistent cross-dataset annotation mapping
+# This creates a standardized naming scheme across all three datasets
+
+# Ashley Webb lab cluster names -> cross_dset_annotation
+webb_mouse_meta  = webb_mouse_meta %>% mutate(cross_dset_annotation = case_when(
+   group == "Neuron" ~ "Neuron",
+   group == "Oligodendrocyte" ~ "Oligodendrocyte", 
+   group == "OPC" ~ "OPC",
+   group == "Astrocyte" ~ "Astrocyte",
+   group == "Microglia/Macrophage" ~ "Immune",
+   group == "Tanycyte" ~ "Tanycyte",
+   group == "Vascular and Leptomeningeal Cell" ~ "Vascular",
+   group == "Pericyte/Endothelial Cell" ~ "Vascular",
+   group == "Ependymocyte" ~ "Ependymal",
+  .default = NA
+))
+
+
+# Mouse hypomap dataset  
+mouse_hypomap_meta = mouse_hypomap_meta %>% mutate(
+  cross_dset_annotation = case_when(
+    cell_type == "neuron" ~ "Neuron",
+    cell_type =="tanycyte" ~  "Tanycyte",
+    cell_type =="astrocyte" ~  "Astrocyte", 
+    cell_type =="oligodendrocyte" ~  "Oligodendrocyte",
+    cell_type =="oligodendrocyte precursor cell" ~  "OPC",
+    cell_type =="microglial cell" ~  "Immune",
+    cell_type =="mural cell" ~  "Vascular",
+    cell_type =="fibroblast" ~  "Vascular", # Group with vascular
+    cell_type =="endothelial cell"~  "Vascular",
+    cell_type =="ependymal cell"~  "Ependymal",
+    cell_type =="hypendymal cell" ~  "Ependymal", #group hypendymal/epen
+    .default = NA
+  )
+)
+
+# Own dataset
+assignments_df = assignments_df %>% mutate(
+  cross_dset_annotation  = case_when( 
+     cell_class == "neuronal" ~ "Neuron",
+      cell_class == "vascular" ~ "Vascular", 
+      cell_class == "olig" ~ "Oligodendrocyte",
+      cell_class == "VLMC" ~ "Vascular", # Vascular and Leptomeningeal Cell
+      cell_class == "bam" ~ "Immune", # Brain Associated Macrophage
+      cell_class == "astrocyte" ~ "Astrocyte",
+      cell_class == "ependymal" ~ "Ependymal",
+      cell_class == "microglia" ~ "Immune", 
+      cell_class == "opc" ~ "OPC",
+      cell_class == "tanycyte" ~ "Tanycyte",
+      cell_class == "tcells" ~ "Immune", # T cells
+     .default = NA
+
+  ))
+
+#add dataset labels, and sex
+mouse_hypomap_meta = mouse_hypomap_meta %>% 
+  mutate(sex = case_when(
+    sex == "female" ~ "Female",
+    sex == "male" ~ "Male",
+    sex == "unknown" ~ "Unknown",
+    .default = NA
+  ))
+
+#get sex all aligned
+mouse_hypomap_meta$sex = as.character(mouse_hypomap_meta$sex)
+
+
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+assignments_df$animal_id = gsub(".*_(\\d+)-.*", "\\1", assignments_df$cell_id)
+assignments_df$sex = animal_metadata$sex[match(assignments_df$animal_id, animal_metadata$animal_id)]
+
+#add dataset label
+assignments_df$dataset = "This Study"
+mouse_hypomap_meta$dataset = "Hypomap"
+webb_mouse_meta$dataset = "Hajdarovic, Yu (Female Aging)"
+
+assignments_df = assignments_df %>% select(dataset, cross_dset_annotation, sex)
+mouse_hypomap_meta = mouse_hypomap_meta %>% select(dataset, cross_dset_annotation, sex)
+webb_mouse_meta = webb_mouse_meta %>% select(dataset, cross_dset_annotation, sex)
+
+#combine all metadata into one df
+full_meta = bind_rows(assignments_df, mouse_hypomap_meta, webb_mouse_meta)
+
+```
+
+Create barplot counting cross_dset_annotation for each sex, colored by dataset
+```{r}
+# Create count data for the barplot
+count_data <- full_meta %>%
+  filter(!is.na(cross_dset_annotation) & !is.na(sex)) %>%
+  count(dataset, sex, cross_dset_annotation) %>%
+  group_by(sex, cross_dset_annotation) %>%
+  mutate(total_count = sum(n)) %>%
+  ungroup()
+
+count_data$dataset <- factor(count_data$dataset,
+                             levels = c("Hypomap",
+                                        "This Study",
+                                        "Hajdarovic, Yu (Female Aging)"))
+# Create the barplot
+p <- ggplot(count_data, aes(x = cross_dset_annotation, y = n, fill = dataset)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ sex, scales = "fixed") +
+  labs(
+    title = "Cell Class Counts by Sex",
+    x = "Cell Class",
+    y = "Number of Cells",
+    fill = "Dataset"
+  ) +
+  theme_minimal(base_size = 20,base_family = "Helvetica",) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1,face = "bold"),
+    plot.title = element_text(hjust = 0.5,face = "bold"),
+    legend.position = "bottom"
+  ) +
+  scale_fill_okabeito() +
+  scale_y_continuous(labels = scales::comma_format())
+
+ggsave("./dataset cell class counts plot.pdf", p, width = 30, height = 20)
+```
+

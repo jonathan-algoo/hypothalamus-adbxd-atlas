@@ -1,0 +1,69 @@
+---
+title: "run gsea barrier cell types"
+output: html_document
+date: "2026-09-19"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+set.seed(1)
+```
+
+```{r}
+dreamlet_results_selected <- qs2::qs_read("./barrier_cluster_dreamlet_de_results_all_contrasts.qs2")
+comparisons_of_interest = dreamlet_results_selected$comparison %>% unique
+clusters = dreamlet_results_selected$cluster %>% unique
+```
+
+```{r}
+# Loop over each contrast
+i = 1
+gsea_results_list <- list()
+for(cur_cluster in clusters) {
+  for (contrast in comparisons_of_interest) {
+    
+    cur_data <- dreamlet_results_selected %>%
+      filter(cluster == cur_cluster) %>% 
+      filter(comparison == contrast) %>%
+      arrange(-logFC)
+    
+    # Build named gene list (ranked by logFC)
+  
+    cur_genelist <- cur_data$logFC
+    names(cur_genelist) <- cur_data$gene
+    cur_genelist <- sort(cur_genelist, decreasing = TRUE)
+    
+    cur_fgsea = gseGO(geneList = cur_genelist,
+                          OrgDb = org.Mm.eg.db,
+                          ont = "BP",
+                          keyType = "SYMBOL",
+                          pAdjustMethod = "BH",
+                          pvalueCutoff = 1,#don't remove any 
+                          by = "fgsea",
+                          nPermSimple = 50000,
+                          seed = TRUE,
+                          eps = 1e-50,
+                          verbose = FALSE)
+    
+    if (nrow(as.data.frame(cur_fgsea)) > 0) {
+        gsea_results_list[[i]] <- cur_fgsea %>%
+          as.data.frame() %>%
+          mutate(contrast = contrast) %>%
+          mutate(cluster = cur_cluster)      
+        i = i + 1
+    }
+  }
+}
+
+
+# Combine all results
+all_gsea_results <- bind_rows(gsea_results_list)
+saveRDS(all_gsea_results, "gsea_results_barrier_cells.rds")
+qs2::qs_save(all_gsea_results, "gsea_results_barrier_cells.qs2")
+```

@@ -1,0 +1,567 @@
+---
+title: "Analyze microglial factors identified through scired"
+output: html_document
+date: "2026-01-05"
+---
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(broom)
+set.seed(1)
+```
+
+Load cell metadata and prepare for analysis
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+
+#add age of death, then filter behavioral metadata for this timepoint
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Filter to microglia only
+cell_metadata = cell_metadata %>% filter(cell_class == "microglia") %>% droplevels()
+```
+
+Load scired factor scores and loadings
+```{r}
+# Load scired factor scores per cell
+scired_scores = readr::read_csv("./scired_scores_per_cell.csv")
+
+# Load scired gene loadings
+scired_loadings = readr::read_csv("./scired_loadings_per_gene.csv")
+
+# Get factor names (Factor_1 through Factor_50)
+factor_names = colnames(scired_scores)[grepl("^Factor_", colnames(scired_scores))]
+
+# Match cell IDs - need to ensure they match
+# The cell_id in scired_scores should match cell_id in cell_metadata
+scired_scores = scired_scores %>% 
+  filter(cell_id %in% cell_metadata$cell_id) %>%
+  left_join(cell_metadata, by = "cell_id")
+```
+
+Define contrasts
+```{r}
+contrasts_list = list(
+  "prolonged_amyloid_male" = "age_genotypeold_5XFAD - age_genotypeold_Ntg",
+  "early_amyloid_male" = "age_genotypeyoung_5XFAD - age_genotypeyoung_Ntg",
+  "aging_male" = "age_genotypeold_Ntg - age_genotypeyoung_Ntg",
+  "prolonged_amyloid_female" = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`)",
+  "early_amyloid_female" = "(age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)",
+  "aging_female" = "(age_genotypeold_Ntg +`age_genotypeold_Ntg:sexFemale`)  - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)",
+  "late_vs_early_amyloid_male" = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD)",
+  "late_vs_early_amyloid_female" = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)",
+  "effect_of_sex_young_ntg" = "`age_genotypeyoung_Ntg:sexFemale`",
+  "effect_of_sex_young_5x" = "`age_genotypeyoung_5XFAD:sexFemale`",
+  "effect_of_sex_old_ntg" = "`age_genotypeold_Ntg:sexFemale`",
+  "effect_of_sex_old_5x" = "`age_genotypeold_5XFAD:sexFemale`"
+)
+```
+
+Aggregate factor scores by animal, then test associations
+```{r}
+# Aggregate factor scores by cluster and animal
+factor_scores_aggregated = scired_scores %>%
+  group_by(animal_id) %>%
+  summarise(
+    across(all_of(factor_names), ~ mean(.x, na.rm = TRUE)),
+    n_cells = n(),
+    .groups = "drop"
+  )
+
+#remove obs with < 50 microglial cells
+factor_scores_aggregated = factor_scores_aggregated %>%
+  filter(n_cells >= 50)
+
+
+#add metadata to factor scores
+factor_scores_aggregated = factor_scores_aggregated %>%
+  left_join(animal_metadata, by = c("animal_id" = "animal_id"))
+
+
+```
+
+Test associations between each contrast and each factor
+```{r}
+#add factor (ex: Factor_1 ~ base formula)
+factor_scores_aggregated$age_genotype = paste0(factor_scores_aggregated$age, "_", factor_scores_aggregated$genotype)
+factor_scores_aggregated$age_genotype = as.factor(factor_scores_aggregated$age_genotype)
+factor_scores_aggregated$sex = factor(factor_scores_aggregated$sex, levels = c("Male","Female"))
+factor_scores_aggregated$sex_age_genotype = paste0(factor_scores_aggregated$sex, "_", factor_scores_aggregated$age_genotype)
+
+#relevel so Male is ref
+factor_scores_aggregated$strain = as.factor(factor_scores_aggregated$strain)
+
+formula_to_test_base = "~ age_genotype + age_genotype:sex + 0 + (1|strain)"
+# Initialize results storage
+association_results = list()
+
+library(lme4)
+library(multcomp)
+
+# Initialize results storage
+all_results <- list()
+
+for(i in 1:length(factor_names)) {
+  cur_factor = factor_names[i]
+  formula_to_test = as.formula(paste(cur_factor, formula_to_test_base))
+  
+  # Initial fit
+  cur_model = lmer(formula_to_test, data = factor_scores_aggregated)
+  
+  # Check strain variance
+  var_summary <- as.data.frame(VarCorr(cur_model))
+  strain_var <- var_summary$vcov[var_summary$grp == "strain"]
+  
+  # Drop RE if negligible
+  if (length(strain_var) > 0 && strain_var < 0.001) {
+    formula_no_re = as.formula(paste(cur_factor, "~ age_genotype + age_genotype:sex + 0"))
+    cur_model = lm(formula_no_re, data = factor_scores_aggregated)
+  }
+  
+  factor_contrast_results <- list()
+  
+  for(j in 1:length(contrasts_list)) {
+    contrast_name <- names(contrasts_list)[j]
+    # Append " = 0" to the contrast string to satisfy glht requirements
+    contrast_string <- paste(contrasts_list[[j]], "= 0")
+    test_result <- glht(cur_model, linfct = setNames(contrast_string, contrast_name))
+    tidy_test <- tidy(summary(test_result,test = adjusted("none")))
+    
+    tidy_test$factor <- cur_factor
+    tidy_test$contrast <- contrast_name
+    
+    factor_contrast_results[[j]] <- tidy_test
+}
+  
+  all_results[[i]] <- bind_rows(factor_contrast_results)
+}
+#p value correction for each contrast separately 
+final_association_table <- bind_rows(all_results) %>%
+  group_by(contrast) %>% 
+  mutate(adj.p.value = p.adjust(p.value, method = "BH")) %>%
+  arrange(p.value)
+
+final_association_table$is_significant = final_association_table$adj.p.value < 0.05
+
+final_association_table_amyloid_sig = final_association_table %>% filter(is_significant) %>% filter(grepl("amyloid", contrast))
+
+final_association_table_amyloid_sig %>% write_csv("significant factor associations with amyloid contrasts.csv")
+```
+
+Evaluate factors for prolonged amyloid male, prolonged amyloid female, early amyloid male, early amyloid female, "effect_of_sex_old_5x, effect_of_sex_young_5x
+
+
+
+Get UMAP coords for each microglia cell, and overlay with colors of factors.
+Plot distribution of each factor on UMAP (color by z scored log cpm)
+```{r}
+# Load UMAP coordinates
+umap_coords = readRDS("./microglia_umap_coords.rds")
+
+# Join scired scores with UMAP coordinates
+scired_scores_umap = scired_scores %>%
+  inner_join(umap_coords, by = "cell_id")
+
+# Z-score each factor for visualization
+for(factor in factor_names) {
+  col_name <- paste0(factor, "_z")
+  scired_scores_umap[[col_name]] = scale(scired_scores_umap[[factor]])[, 1]
+  scired_scores_umap[[col_name]][scired_scores_umap[[col_name]] > 5] <- 5
+  scired_scores_umap[[col_name]][scired_scores_umap[[col_name]] < -5] <- -5
+  #set max value to 10
+}
+```
+
+
+```{r}
+# Create plots for each factor
+library(ggplot2)
+library(patchwork)
+
+# Initialize list to store plots
+factor_plots = list()
+
+for(i in seq_along(factor_names)) {
+  cur_factor = factor_names[i]
+  z_col = paste0(cur_factor, "_z")
+  #Replace _ in Factor_1 with space for better plot title
+  plot_title = gsub("_", " ", cur_factor)
+  
+  # Create UMAP plot colored by z-scored factor values
+  p = ggplot(scired_scores_umap, aes(x = UMAP1, y = UMAP2, color = .data[[z_col]])) +
+    geom_point(size = 0.1, alpha = 0.6) +
+    scale_color_gradient2(low = "blue", mid = "white", high = "red", 
+                          midpoint = 0, 
+                          name = "Scaled\nExpression") +
+    labs(title = plot_title) +
+    theme_classic(base_family = "Helvetica",base_size = 10) +
+    guides(color = guide_colorbar(title.position = "top", title.hjust = 0.5))
+  
+  factor_plots[[i]] = p
+}
+
+
+#cluster.x and cluster.y are same here
+scired_scores_umap$cluster = scired_scores_umap$cluster.x
+#str to title
+scired_scores_umap$cluster = str_to_title(scired_scores_umap$cluster)
+scired_scores_umap$cluster = factor(scired_scores_umap$cluster, levels = scired_scores_umap$cluster %>% unique %>%  sort)
+#add a general plot with the original umap cluster
+library(khroma)
+p = ggplot(scired_scores_umap, aes(x = UMAP1, y = UMAP2, color = cluster)) +
+    geom_point(size = 0.1, alpha = 0.6,shape = 16) +
+    labs(title = "Microglia Cluster Assignments") +
+    theme_classic(base_family = "Helvetica",base_size = 10) +
+    scale_color_okabeito(name = "Cluster") 
+
+combined_plot_list = c(list(p + guides(color = guide_legend(override.aes = list(size = 4)))), factor_plots) # Add the original UMAP plot to the beginning of the list
+
+# Combine all plots in a 10x5 grid (10 columns, 5 rows for 50 factors)
+combined_plot = wrap_plots(combined_plot_list, ncol = 8, nrow = 7) 
+
+# Save the combined plot
+ggsave("microglia_factors_umap_all.pdf", combined_plot, 
+       width = 40, height = 20, limitsize = F, units = "in")
+#plot factor 2 to highlight it, which marks a distinct subtype, the interferon associated subtype. Use same dimensions as plot of UMAP (10 x 10)
+```
+
+Plot UMAP of Factor 13
+```{r}
+f13_plot = (p + guides(color = guide_legend(override.aes = list(size = 3)))) / (factor_plots[[13]] + labs(title = "Factor 13 Expression")) & geom_point(size = .5) & 
+    theme(
+      plot.title = element_text(size = 25, hjust = 0.5,face = "bold"),
+      axis.title = element_text(size = 25,face = "bold"),
+      axis.text = element_text(size = 20,face = "bold"),
+      legend.title = element_text(size = 20,face = "bold"),
+      legend.text = element_text(size = 12,face = "bold"),
+      legend.key.size = unit(0.3, "cm"),
+      legend.key.spacing.y = unit(.2, "cm")
+    )
+
+ggsave("microglia_factor13_umap_cluster.pdf", f13_plot, 
+       width = 10, height = 15, limitsize = F, units = "in")
+```
+
+
+
+Plot factor 13 male and female contrasts
+```{r}
+# Aggregate factor scores by cluster and animal
+factor_scores_aggregated = scired_scores %>%
+  group_by(animal_id) %>%
+  summarise(
+    across(all_of(factor_names), ~ mean(.x, na.rm = TRUE)),
+    n_cells = n(),
+    .groups = "drop"
+  )
+
+#remove obs with < 50 microglial cells
+factor_scores_aggregated = factor_scores_aggregated %>%
+  filter(n_cells >= 50)
+
+
+#add metadata to factor scores
+factor_scores_aggregated = factor_scores_aggregated %>%
+  left_join(animal_metadata, by = c("animal_id" = "animal_id"))
+
+#recode old to 14 and young to 6
+factor_scores_aggregated$age = case_when(
+  factor_scores_aggregated$age == "young" ~ "6",
+  factor_scores_aggregated$age == "old" ~ "14",
+  .default = NA
+)
+factor_scores_aggregated$sex_age_genotype = paste(factor_scores_aggregated$sex, factor_scores_aggregated$age, factor_scores_aggregated$genotype,sep = "_") 
+
+factor_scores_aggregated$sex_age_genotype = factor(factor_scores_aggregated$sex_age_genotype,levels = c("Male_6_Ntg", "Male_6_5XFAD","Male_14_Ntg", "Male_14_5XFAD","Female_6_Ntg", "Female_6_5XFAD","Female_14_Ntg", "Female_14_5XFAD"))
+
+```
+
+
+```{r}
+library(ggsignif)
+
+f13_results = final_association_table %>% filter(factor == "Factor_13")
+
+# Function to extract FDR-corrected p-value and format annotation
+get_pvalue_annotation_factors <- function(comparison, results_df) {
+  # Create a sorted key for the comparison (handles both orders)
+  comp_key <- paste(sort(comparison), collapse = "_")
+  
+  # Map comparisons to contrasts using sorted keys
+  contrast_lookup <- list(
+    "Male/6/5XFAD_Male/6/Ntg" = "early_amyloid_male",
+    "Male/14/5XFAD_Male/14/Ntg" = "prolonged_amyloid_male",
+    "Female/6/5XFAD_Female/6/Ntg" = "early_amyloid_female",
+    "Female/14/5XFAD_Female/14/Ntg" = "prolonged_amyloid_female",
+    "Male/14/5XFAD_Male/6/5XFAD" = "late_vs_early_amyloid_male",
+    "Female/14/5XFAD_Female/6/5XFAD" = "late_vs_early_amyloid_female",
+    "Female/6/5XFAD_Male/6/5XFAD" = "effect_of_sex_young_5x",
+    "Female/14/5XFAD_Male/14/5XFAD" = "effect_of_sex_old_5x"
+  )
+  
+  contrast_name <- contrast_lookup[[comp_key]]
+  
+  if (is.null(contrast_name)) {
+    # Debug: uncomment to see which comparison failed to match
+    # cat("Warning: No contrast found for comparison:", paste(comparison, collapse=" vs "), "| Key:", comp_key, "\n")
+    return("NA")
+  }
+  
+  # Extract p-value from results
+  result_row <- results_df %>%
+    filter(contrast == contrast_name)
+  
+  if (nrow(result_row) == 0) {
+    return("NA")
+  }
+  
+  # Try different possible column names for FDR-corrected p-value
+  # Common sccomp column names: c_FDR, p_adjusted, p.adjusted, FDR, padj
+  p_adj <- NULL
+  if ("adj.p.value" %in% names(result_row)) {
+    p_adj <- result_row$adj.p.value[1]
+  } else {
+    return("error")
+  }
+  
+  # Format annotation
+  if (p_adj < 0.001) {
+    return("***")
+  } else if (p_adj < 0.01) {
+    return("**")
+  } else if (p_adj < 0.05) {
+    return("*")
+  } else {
+    # Format p-value to 2 decimal places
+    p_formatted <- sprintf("%.2f", round(p_adj, 2))
+    return(paste0("NS (adj. p = ", p_formatted, ")"))
+  }
+}
+
+comparisons_list <- list(
+  c("Male/6/Ntg", "Male/6/5XFAD"),
+  c("Male/14/Ntg", "Male/14/5XFAD"),
+  c("Female/6/Ntg", "Female/6/5XFAD"),
+  c("Female/14/Ntg", "Female/14/5XFAD"),
+  c("Male/6/5XFAD", "Male/14/5XFAD"),
+  c("Female/6/5XFAD", "Female/14/5XFAD"),
+  c("Male/6/5XFAD", "Female/6/5XFAD"),
+  c("Male/14/5XFAD", "Female/14/5XFAD")
+)
+
+# Get annotations for microglia-4
+annotations_f13 <- sapply(comparisons_list, function(comp) {
+  get_pvalue_annotation_factors(comp, f13_results)
+})
+
+library(ggsignif)
+#replace the "_" in comparisons list with "/"
+
+factor_scores_aggregated$sex_age_genotype = gsub("_", "/", factor_scores_aggregated$sex_age_genotype)
+```
+
+
+```{r}
+factor_scores_aggregated$sex_age_genotype = factor(factor_scores_aggregated$sex_age_genotype, levels =  c("Male/6/Ntg", "Male/6/5XFAD","Male/14/Ntg", "Male/14/5XFAD","Female/6/Ntg", "Female/6/5XFAD","Female/14/Ntg", "Female/14/5XFAD"))
+
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+
+
+factor_13_plot = ggplot(factor_scores_aggregated, aes(x = sex_age_genotype, y = Factor_13)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(aes(color = strain),height = 0, width = .2, size = 6) +
+  labs(
+    x = "Sex/Age/Genotype",
+    y = "F13 Expression"
+  ) + theme_classic(base_family = "Helvetica",base_size = 35) + scale_color_manual(values = color_mapping_strains_to_colors) +
+  theme(
+    plot.title = element_text(face = "bold", size = 35,hjust = .5),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(size = 35,face = "bold", color = "black", angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 35,face = "bold", color = "black"),
+    axis.title.x = element_text(face = "bold", color = "black", size = 40),
+    axis.title.y = element_text(face = "bold", color = "black", size = 40),
+    strip.text = element_text(face = "bold"), # For facet labels (Young/Old)
+    legend.position = "none"
+  ) + scale_fill_brewer() +
+geom_signif(annotations = annotations_f13,
+              comparisons = comparisons_list,
+            textsize = 10, step_increase = 0,
+            y_position = seq(1.3,2.9,.2))
+
+ggsave("F13_group_differences.pdf", factor_13_plot, width = 15, height = 17) # Adjusted size
+```
+
+
+```{r}
+scired_scores_umap$cluster = scired_scores_umap$cluster.x
+
+scired_scores_umap$cluster = str_to_title(scired_scores_umap$cluster)
+
+# Create violin plot of Factor 13 across clusters
+factor13_violin = ggplot(scired_scores_umap, aes(x = cluster, y = Factor_13_z, fill = cluster)) +
+  geom_violin(trim = FALSE, scale = "width") +
+  labs(
+    title = "Factor 13 Expression Across Microglia Clusters",
+    x = "Cluster",
+    y = "Factor 13 Z Score"
+  ) +
+  theme_classic(base_family = "Helvetica",base_size = 10) +
+  theme(
+    legend.position = "none",
+plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+    legend.title = element_text(face = "bold")
+  ) 
+ggsave("f13 violin plot by cluster.pdf", factor13_violin, 
+       width = 10, height = 5, units = "in")
+
+#plot names of top 10 and bottom 10 genes for Factor 13 along with their loadings
+factor13_loadings = scired_loadings %>%
+  dplyr::select(gene, Factor_13) %>%
+  arrange(desc(Factor_13))
+
+top_10_genes = factor13_loadings %>% slice_max(Factor_13, n = 10)
+bottom_10_genes = factor13_loadings %>% slice_min(Factor_13, n = 10)
+
+# Combine top and bottom genes
+combined_genes = rbind(top_10_genes, bottom_10_genes)
+# Create bar plot of loadings
+factor13_loadings_plot = ggplot(combined_genes, aes(x = reorder(gene, Factor_13), y = Factor_13, fill = Factor_13 > 0)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top and Bottom 10 Gene Loadings for Factor 13",
+    x = "",
+    y = "Loading"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
+    axis.title = element_text(size = 10),
+    axis.text.x = element_text(size = 15, face = "bold",color = "black"),
+    axis.text.y = element_text(size = 15, face = "bold", color = "black"),
+    legend.position = "none"
+  ) +
+  scale_fill_manual(values = c("red", "blue"))
+
+
+ggsave("microglia_factor13_top_loadings.pdf", factor13_loadings_plot, 
+       width = 10, height = 6, units = "in")
+#plot fraction w/ z scored greater than 2
+# Calculate fraction of cells with Factor_13_z > 2 for each cluster
+factor13_fraction_by_cluster_greater_than_2_sds  = scired_scores_umap %>% 
+  group_by(cluster.x) %>%
+  summarise(
+    total_cells = n(),
+    cells_above_threshold = sum(Factor_13_z > 2, na.rm = TRUE),
+    fraction_above_threshold = cells_above_threshold / total_cells,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(fraction_above_threshold))
+
+factor13_fraction_by_cluster_greater_than_2_sds$cluster = str_to_title(factor13_fraction_by_cluster_greater_than_2_sds$cluster.x)
+# Create bar plot of fractions
+factor13_fraction_plot = ggplot(factor13_fraction_by_cluster_greater_than_2_sds, 
+                                 aes(x = cluster,
+                                     y = fraction_above_threshold)) +
+  geom_bar(stat = "identity", fill = "black") +
+  labs(
+    x = "Cluster",
+    y = "Percent of Cells",
+    title = "Percent of Cells w/ Factor 13 Scaled Expression Greater than 2",
+    fill = "Cluster"
+  ) +
+  theme_classic(base_family = "Helvetica",base_size = 10) +
+    theme(
+    legend.position = "none",
+plot.title = element_text(face = "bold", size = 20, hjust = .5),
+    axis.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(face = "bold", color = "black", size = 10),
+    legend.title = element_text(face = "bold")
+  ) +
+  scale_y_continuous(limits = c(0,.15),labels = scales::percent_format(accuracy = 1))
+
+
+# Save the fraction plot
+ggsave("microglia_factor13_fraction_zscore_above2.pdf", factor13_fraction_plot, 
+       width = 10, height = 8, units = "in")
+
+```
+
+
+

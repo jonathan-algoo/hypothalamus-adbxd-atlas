@@ -1,0 +1,267 @@
+---
+title: "consensus proportion modeling - sccomp"
+output: html_document
+date: "2025-07-22"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+```
+
+Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments. Perform testing and evaluation on each cell class separately. 
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+# Split the cluster assignments into a list by cell class
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+#convert animal_id to factor, to use to add metadata later 
+animal_metadata$animal_id = as.factor(animal_metadata$animal_id)
+
+```
+
+
+Get list of cluster counts per cell class
+```{r}
+cluster_counts_per_class = vector(mode = "list", length = length(cluster_list))
+names(cluster_counts_per_class) = names(cluster_list)
+
+for(i in seq_along(cluster_list)) {
+  cur_class = names(cluster_list)[i]
+  #initialize df to count cluster counts
+  cluster_counts = cluster_list[[cur_class]] %>% ungroup()
+  #convert columns to factor
+  cluster_counts$cluster = as.factor(cluster_counts$cluster)
+  cluster_counts$animal_id = as.factor(cluster_counts$animal_id)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  cluster_counts = cluster_counts %>% ungroup() %>% group_by(cluster, animal_id, .drop = F) %>% dplyr::count(name = "count")
+  #add other columns back
+  cluster_counts = cluster_counts %>% left_join(animal_metadata, by = "animal_id")
+  #convert columns to factor
+  cluster_counts$genotype = as.factor(cluster_counts$genotype)
+  cluster_counts$strain = as.factor(cluster_counts$strain)
+  cluster_counts$sex = as.factor(cluster_counts$sex)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  #add "animal_" and "cluster_" to relevant columns to avoid problems with sccomp
+  cluster_counts$animal_id = paste0("animal_", cluster_counts$animal_id) %>% as.factor()
+  cluster_counts$cluster = paste0("cluster_", cluster_counts$cluster) %>% as.factor()
+  #relevel to get the following as reference: genotype - Ntg, age - 6, sex - M
+  cluster_counts$genotype = relevel(cluster_counts$genotype, ref = "Ntg")
+  cluster_counts$age = relevel(cluster_counts$age, ref = "young")
+  cluster_counts$sex = relevel(cluster_counts$sex, ref = "Male")
+  cluster_counts = cluster_counts %>%
+    mutate(age_genotype = interaction(age, genotype,sep = "_"))
+  cluster_counts$strain = relevel(cluster_counts$strain, ref = "B6")
+  #ungroup the data to avoid problems with sccomp
+  cluster_counts = cluster_counts %>% ungroup()
+  cluster_counts_per_class[[cur_class]] = cluster_counts
+}
+
+```
+
+
+Per cell class, evaluate cluster proportion differences separately for Male and Female using the formula ~ age*genotype + (1|strain).
+```{r}
+# Add "animal_" prefix to animal_id for filtering
+animal_metadata$animal_id = paste0("animal_", animal_metadata$animal_id) %>% as.factor()
+
+#reparametrize so age*genotype combinations are in separate groups
+animal_metadata = animal_metadata %>%
+  mutate(age_genotype = interaction(age, genotype,sep = "_"))
+#levels: young_Ntg old_5XFAD young_5XFAD old_Ntg
+
+#create variable denoting sex 
+
+# Define the formula as a formula object
+sccomp_formula = as.formula("~ age_genotype + age_genotype:sex + 0 + (1|strain)")
+
+#list of model contrasts
+#prolonged exposure to amyloid contrast
+prolonged_amyloid_contrast_m = "age_genotypeold_5XFAD - age_genotypeold_Ntg"
+early_amyloid_contrast_m = "age_genotypeyoung_5XFAD - age_genotypeyoung_Ntg"
+aging_contrast_m = "age_genotypeold_Ntg - age_genotypeyoung_Ntg"
+
+prolonged_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`)"
+early_amyloid_contrast_f = "(age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
+aging_contrast_f = "(age_genotypeold_Ntg +`age_genotypeold_Ntg:sexFemale`)  - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
+
+#evaluate whether the slope changes between AD and control
+#(Change in AD) - (Change in Ntg)
+slope_change_ad_control_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD) - (age_genotypeold_Ntg - age_genotypeyoung_Ntg)"
+#(Change in AD Female) - (Change in Ntg Female)
+#(AD Female Old - AD female young) - (Control Female Old - Control Female young)
+slope_change_ad_control_contrast_f = "((age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)) - ((age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`))"
+
+#3 way interaction - 
+sex_effect_on_slope_difference_between_ad_control_contrast = paste0(slope_change_ad_control_contrast_m,"- (",slope_change_ad_control_contrast_f,")")
+
+late_vs_early_amyloid_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD)"
+
+late_vs_early_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)"
+
+
+
+effect_of_sex_young_ntg = "`age_genotypeyoung_Ntg:sexFemale`"
+effect_of_sex_young_5x = "`age_genotypeyoung_5XFAD:sexFemale`"
+effect_of_sex_old_ntg = "`age_genotypeold_Ntg:sexFemale`"
+effect_of_sex_old_5x = "`age_genotypeold_5XFAD:sexFemale`"
+```
+
+
+
+```{r}
+# Create a named list of all contrasts to test
+contrasts_list = list(
+  "prolonged_amyloid_male" = prolonged_amyloid_contrast_m,
+  "early_amyloid_male" = early_amyloid_contrast_m,
+  "aging_male" = aging_contrast_m,
+  "prolonged_amyloid_female" = prolonged_amyloid_contrast_f,
+  "early_amyloid_female" = early_amyloid_contrast_f,
+  "aging_female" = aging_contrast_f,
+  "late_vs_early_amyloid_male" = late_vs_early_amyloid_contrast_m,
+  "late_vs_early_amyloid_female" = late_vs_early_amyloid_contrast_f,
+  "effect_of_sex_young_ntg" = effect_of_sex_young_ntg,
+  "effect_of_sex_young_5x" = effect_of_sex_young_5x,
+  "effect_of_sex_old_ntg" = effect_of_sex_old_ntg,
+  "effect_of_sex_old_5x" = effect_of_sex_old_5x
+)
+
+# Initialize results storage
+sccomp_class_results_list = vector(mode = "list", length = length(cluster_counts_per_class))
+names(sccomp_class_results_list) = names(cluster_counts_per_class)
+
+# Loop for each sex (Male and Female)
+animals_to_keep = animal_metadata %>% pull(animal_id) %>% as.character()
+```
+
+
+```{r}
+# Loop through each cell class
+for(i in seq_along(cluster_counts_per_class)) {
+  cur_class = names(cluster_counts_per_class)[i]
+  cluster_counts = cluster_counts_per_class[[cur_class]]
+  
+  # Filter only for animals in this sex group
+  cluster_counts = cluster_counts %>% filter(animal_id %in% animals_to_keep) %>% droplevels()
+  
+  # Run sccomp analysis
+  model = cluster_counts %>%
+    sccomp_estimate(
+      formula_composition = sccomp_formula,
+      sample = "animal_id",
+      cell_group = "cluster",
+      abundance = "count",
+      bimodal_mean_variability_association = T
+    ) 
+  model = model %>% sccomp_remove_outliers(percent_false_positive = 10)
+  
+  # Initialize list to store results for each contrast
+  contrast_results_list = vector(mode = "list", length = length(contrasts_list))
+  names(contrast_results_list) = names(contrasts_list)
+  
+  # Loop over each contrast and test it
+  for(j in seq_along(contrasts_list)) {
+    contrast_name = names(contrasts_list)[j]
+    contrast_formula = contrasts_list[[j]]
+    
+    # Test the contrast
+    contrast_result = model %>% sccomp_test(contrast_formula,test_composition_above_logit_fold_change = 0)
+    
+    # Add contrast name to the result
+    contrast_result$contrast = contrast_name
+    
+    # Store the result
+    contrast_results_list[[contrast_name]] = contrast_result
+  }
+  
+  # Combine all contrast results for this cell class
+  all_contrast_results = bind_rows(contrast_results_list)
+  
+  # Store the combined model results
+  sccomp_class_results_list[[cur_class]][["model"]] = all_contrast_results
+}
+
+# Save the results
+results_list <- list()
+
+for (class_name in names(sccomp_class_results_list)) {
+  # Get the results for the current model
+  current_model_results <- sccomp_class_results_list[[class_name]]$model
+  current_model_results$cell_class <- class_name
+  results_list <- append(results_list, list(current_model_results))
+}
+sccomp_results <- bind_rows(results_list)
+
+saveRDS(sccomp_results, "sccomp_prop_results.rds")
+```
+

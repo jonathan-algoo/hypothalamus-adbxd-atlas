@@ -1,0 +1,354 @@
+---
+title: "variance partition analysis vis"
+output: html_document
+date: "2026-01-29"
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(patchwork)
+library(grid)
+```
+
+
+Loop over each class, add class name and put together. Plot celltype specific genes
+```{r}
+#read in results
+all_results = readRDS("all_results_var_partition_analysis.rds")
+full_var_part_list = list()
+for(i in 1:length(all_results)) {
+  cur_class = names(all_results)[i]
+  cur_df = all_results[[i]]$variance_df
+  #only keep genes with strain higher than 10% explained var
+  full_var_part_list[[cur_class]] = cur_df
+}
+full_var_part_df_strain = full_var_part_list %>% bind_rows()
+```
+
+
+```{r shared_high_strain_genes, echo=TRUE}
+# Filter genes with >10% strain explained variance (strain > 0.1)
+high_strain_genes <- full_var_part_df_strain %>%
+  filter(strain > 0.1)
+num_genes_per_class = high_strain_genes$class %>% table %>% as.data.frame.table() %>% rename("class" = ".") %>% rename("num_genes" = "Freq")
+library(readr)
+num_genes_per_class %>% write_csv("variance_partition_num_genes_per_class.csv")
+
+num_classes_gene <- high_strain_genes %>%
+  group_by(gene) %>%
+  summarize(
+    n_classes = n_distinct(class),
+    class_names = paste(unique(class), collapse = ", ")
+  ) %>%
+  ungroup()
+
+write.csv(
+  num_classes_gene, 
+  "./variance_partition_high_strain_genes_and_classes.csv")
+# Identify genes appearing in 3 or more classes
+shared_genes_3plus <- num_classes_gene %>%
+  filter(n_classes >= 3)
+
+# Display the number of genes shared across 3 or more classes at >10% strain variance
+cat("Number of genes with >10% strain variance explained found in 3 or more classes:", nrow(shared_genes_3plus), "\n")
+
+# Optionally, plot number of genes binned by number of classes (for overview)
+num_genes_variance_plot = ggplot(num_classes_gene, aes(x = n_classes)) +
+  geom_bar(fill = "#0571b0") +
+  geom_text(
+    aes(label = after_stat(count)), 
+    stat = 'count', 
+    vjust = -0.25, 
+    size = 3
+  ) +
+  scale_x_continuous(breaks = seq(1, max(num_classes_gene$n_classes), 1)) +
+  labs(
+    x = "Number of classes gene appears in (> 10% strain variance)",
+    y = "Number of genes",
+    title = "Distribution of genes by number of classes with\n> 10% strain variance explained"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(
+  "./num_genes_shared_across_classes_variance_partition.pdf", 
+  plot = num_genes_variance_plot, 
+  width = 8, 
+  height = 6
+)
+```
+
+```{r}
+# --- UpSet plot ---
+library(ComplexHeatmap)
+library(stringr)
+
+gene_class_matrix <- high_strain_genes %>%
+  distinct(gene, class) %>%
+  mutate(class = str_to_title(class)) %>%
+  mutate(present = 1) %>%
+  pivot_wider(names_from = class, values_from = present, values_fill = 0) %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+
+```
+
+
+```{r}
+# 1. Build the full combination matrix
+comb_mat_full <- make_comb_mat(gene_class_matrix, mode = "distinct")
+
+# 2. Capture full set sizes BEFORE filtering (so they reflect true totals)
+full_set_sizes <- set_size(comb_mat_full)
+
+# 3. Filter to intersections > 1
+comb_mat_filtered <- comb_mat_full[comb_size(comb_mat_full) > 1]
+
+# 4. Reorder full_set_sizes to match the filtered matrix's set (row) order
+aligned_set_sizes <- full_set_sizes[set_name(comb_mat_filtered)]
+
+# 5. Build the left annotation using the aligned sizes
+l_annot <- rowAnnotation(
+  "Set Size" = anno_barplot(
+    aligned_set_sizes,
+    border = FALSE,
+    gp = gpar(fill = "black"),
+    width = unit(4, "cm"),
+    ylim = c(0, 75),
+    axis_param = list(
+      direction = "reverse",
+      at = c(0, 25, 50, 75),
+      labels = c("0", "25", "50", "75")
+    )
+  ),
+  annotation_name_side = "bottom"
+)
+
+# 6. Draw
+upset_plot <- UpSet(
+  comb_mat_filtered,
+  comb_order = order(-comb_size(comb_mat_filtered)),
+  set_order = order(-aligned_set_sizes),
+  top_annotation = upset_top_annotation(comb_mat_filtered, add_numbers = TRUE),
+  right_annotation = NULL,
+  row_names_gp = gpar(fontsize = 10),
+  row_names_side = "left",
+  left_annotation = l_annot,
+  column_title = "Shared Variable Genes Across Classes"
+)
+
+pdf("./num_genes_shared_across_classes_upset.pdf", width = 10, height = 4)
+draw(upset_plot)
+dev.off()
+
+draw(upset_plot)
+```
+
+
+
+
+
+Plot heatmap
+```{r}
+#only keep genes with strain higher than 20% explained var (strain > .2)
+full_var_part_list = list()
+for(i in 1:length(all_results)) {
+  cur_class = names(all_results)[i]
+  cur_df = all_results[[i]]$variance_df
+  cur_df = cur_df %>% filter(strain > .2)
+  full_var_part_list[[cur_class]] = cur_df
+}
+full_var_part_df_strain = full_var_part_list %>% bind_rows()
+
+
+
+# --- 1. Identify and Filter Genes found in multiple classes ---
+genes_to_remove <- full_var_part_df_strain %>%
+  dplyr::count(gene) %>%
+  filter(n > 1) %>%
+  pull(gene)
+
+top_genes_per_class <- full_var_part_df_strain %>%
+  filter(!gene %in% genes_to_remove) %>%
+  group_by(class) %>%
+  slice_max(order_by = strain, n = 5) %>%
+  ungroup()
+
+
+# --- 2. Gather, Tidy, and Scale Data ---
+tidy_data_list <- list()
+for (cur_class in unique(top_genes_per_class$class)) {
+  genes_to_plot <- top_genes_per_class %>%
+    filter(class == cur_class) %>%
+    pull(gene)
+  
+  if (length(genes_to_plot) == 0) next
+  
+  norm_exp <- all_results[[cur_class]][["norm_exp_data"]]
+  meta <- all_results[[cur_class]][["pb_meta"]]
+  genes_in_matrix <- intersect(genes_to_plot, rownames(norm_exp))
+  
+  if (length(genes_in_matrix) == 0) next
+  
+  class_tidy_data <- as.data.frame(as.matrix(norm_exp[genes_in_matrix, , drop = FALSE])) %>%
+    rownames_to_column("gene") %>%
+    pivot_longer(cols = -gene, names_to = "animal_id", values_to = "expression") %>%
+    left_join(meta %>% select(animal_id, strain, genotype, sex, age), by = "animal_id") %>%
+    mutate(class = cur_class)
+    
+  tidy_data_list[[cur_class]] <- class_tidy_data
+}
+
+full_tidy_data <- bind_rows(tidy_data_list)
+
+heatmap_tidy_data <- full_tidy_data %>%
+  group_by(class, gene) %>%
+  mutate(scaled_expression = scale(expression)[, 1]) %>%
+  ungroup()
+
+
+# --- 3. Determine Gene, Strain, and Animal Order ---
+final_gene_order <- c()
+for(cur_class in unique(heatmap_tidy_data$class)){
+  class_data <- heatmap_tidy_data %>% filter(class == cur_class)
+  
+  if(length(unique(class_data$gene)) < 2) {
+      class_gene_order <- unique(class_data$gene)
+  } else {
+      class_matrix <- class_data %>%
+        select(gene, animal_id, scaled_expression) %>%
+        pivot_wider(names_from = animal_id, values_from = scaled_expression) %>%
+        column_to_rownames("gene")
+    #  class_matrix[is.na(class_matrix)] <- 0 
+      hclust_result <- hclust(dist(class_matrix))
+      class_gene_order <- hclust_result$labels[hclust_result$order]
+  }
+  final_gene_order <- c(final_gene_order, class_gene_order)
+}
+
+strain_order_df <- heatmap_tidy_data %>%
+  group_by(strain, gene) %>%
+  summarise(mean_scaled_expression = mean(scaled_expression, na.rm = TRUE), .groups = 'drop')
+
+strain_cluster_matrix <- strain_order_df %>%
+  pivot_wider(names_from = gene, values_from = mean_scaled_expression) %>%
+  column_to_rownames("strain")
+
+#strain_cluster_matrix[is.na(strain_cluster_matrix)] <- 0
+strain_hclust <- hclust(dist(strain_cluster_matrix))
+strain_order <- strain_hclust$labels[strain_hclust$order]
+strain_order <- c("B6", setdiff(strain_order, "B6"))
+# 
+# animal_order <- heatmap_tidy_data %>%
+#   select(animal_id, strain) %>%
+#   distinct() %>%
+#   arrange(factor(strain, levels = strain_order), animal_id) %>%
+#   pull(animal_id) %>%
+#   unique()
+
+animal_order <- heatmap_tidy_data %>%
+  select(animal_id, strain, sex, age, genotype) %>%
+  distinct() %>%
+  arrange(factor(strain, levels = strain_order), sex, age, genotype, animal_id) %>%
+  pull(animal_id) %>%
+  unique()
+
+heatmap_tidy_data$gene <- factor(heatmap_tidy_data$gene, levels = rev(final_gene_order))
+heatmap_tidy_data$strain <- factor(heatmap_tidy_data$strain, levels = strain_order)
+heatmap_tidy_data$animal_id <- factor(heatmap_tidy_data$animal_id, levels = animal_order)
+```
+
+Split
+```{r}
+# --- 4. Create Annotation and Heatmap Plots ---
+
+# Define the Okabe-Ito color palette
+okabe_ito_palette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+# Create the annotation data frame
+annotation_long <- heatmap_tidy_data %>%
+  select(animal_id, strain, genotype, sex, age) %>%
+  distinct() %>%
+  pivot_longer(
+    cols = c("genotype", "sex", "age"),
+    names_to = "category",
+    values_to = "value"
+  ) %>%
+  mutate(
+    animal_id = factor(animal_id, levels = animal_order),
+    strain = factor(strain, levels = strain_order),
+    category = factor(category, levels = c("genotype", "sex", "age"))
+  )
+
+# Create the annotation plot
+annotation_plot <- ggplot(annotation_long, aes(x = animal_id, y = category, fill = value)) +
+  geom_tile(color = "white", linewidth = 0.2) +
+  facet_grid(~ strain, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    values = okabe_ito_palette,
+    guide = guide_legend(title.position = "top", keywidth = 0.5, keyheight = 0.5)
+  ) +
+  scale_y_discrete(limits = rev(c("sex", "age", "genotype"))) +
+  theme_void() +
+  theme(
+    strip.text.x = element_blank(),
+    legend.position = "top",
+    legend.box = "horizontal",
+    legend.title = element_text(face = "bold", size = 16),
+    legend.text = element_text(size = 14,face = "bold"),
+    # MODIFIED: Reduced spacing between strains
+    panel.spacing.x = unit(0.1, "lines")
+  ) +
+  labs(fill = NULL)
+
+library(tidyverse)
+heatmap_tidy_data$class = str_to_title(heatmap_tidy_data$class)
+# Create the main heatmap plot
+heatmap_plot <- ggplot(heatmap_tidy_data, aes(x = animal_id, y = gene, fill = scaled_expression)) +
+  geom_tile(color = "white", linewidth = 0.1) +
+  facet_grid(class ~ strain, scales = "free", space = "free", switch = "both") +
+  scale_fill_gradient2(
+    low = "#0571b0", 
+    mid = "white",
+    high = "#ca0020",
+    midpoint = 0,
+    name = "Scaled \nExpression \n(Z-score)"
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid = element_blank(),
+    strip.text.y.left = element_text(angle = 0, face = "bold", size = 14),
+    strip.text.x = element_text(face = "bold", angle = 0, hjust = .25, size = 14),
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(size = 12, face = "bold"),
+    strip.placement = "outside",
+    # MODIFIED: Reduced spacing between strains
+    panel.spacing.x = unit(0.1, "lines")
+  )
+
+
+# --- 5. Combine Plots and Save ---
+combined_plot <- annotation_plot / heatmap_plot +
+  plot_layout(heights = c(1, 7), guides = "collect")
+
+ggsave(
+  "./celltype_specific_strain_genes_with_full_annotation.pdf", 
+  plot = combined_plot, 
+  width = 20, 
+  height = 10
+)
+```

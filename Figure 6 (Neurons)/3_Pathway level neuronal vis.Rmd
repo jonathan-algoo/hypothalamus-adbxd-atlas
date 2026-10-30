@@ -1,0 +1,545 @@
+---
+title: "neuronal pathway level alterations vis"
+output: html_document
+date: "2026-03-31"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+set.seed(1)
+all_gsea_results = readRDS("gsea_results_canonical_neurons.rds")
+```
+
+Axoneme assembly result - strong and consistent across multiple cell types
+
+15_Histaminergic
+```{r}
+cilia_histaminergic_comparisons_females = all_gsea_results %>% filter(cluster == "15_Histaminergic") %>% filter(p.adjust < 0.05) %>%
+    filter(contrast %in% c("prolonged_amyloid_contrast_f","early_amyloid_contrast_f","late_vs_early_amyloid_contrast_f","aging_contrast_f")) %>% 
+  filter(Description == "axoneme assembly")
+
+cilia_histaminergic_comparisons_females$sig_label = case_when(
+  cilia_histaminergic_comparisons_females$p.adjust < 0.001 ~ "***",
+  cilia_histaminergic_comparisons_females$p.adjust < 0.01 ~ "**",
+  cilia_histaminergic_comparisons_females$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+cilia_histaminergic_comparisons_females$Description = str_to_title(cilia_histaminergic_comparisons_females$Description)
+
+cilia_histaminergic_comparisons_females = cilia_histaminergic_comparisons_females %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    contrast == "effect_of_sex_old_ntg" ~ "14 Month Ntg F vs 14 Month Ntg M",
+    contrast == "effect_of_sex_old_5x" ~ "14 Month 5X F vs 14 Month 5X M",
+    contrast == "effect_of_sex_young_ntg" ~ "6 Month Ntg F vs 6 Month Ntg M",
+    contrast == "effect_of_sex_young_5x" ~ "6 Month 5X F vs 6 Month 5X M",
+    .default = contrast
+  )
+)
+```
+
+44_Glp1r_Lepr
+```{r}
+cilia_glp1r_comparisons_females = all_gsea_results %>% filter(cluster == "44_Glp1r_Lepr") %>% filter(p.adjust < 0.05) %>%
+    filter(contrast %in% c("prolonged_amyloid_contrast_f","early_amyloid_contrast_f","late_vs_early_amyloid_contrast_f","aging_contrast_f")) %>% 
+  filter(Description == "axoneme assembly")
+
+cilia_glp1r_comparisons_females$sig_label = case_when(
+  cilia_glp1r_comparisons_females$p.adjust < 0.001 ~ "***",
+  cilia_glp1r_comparisons_females$p.adjust < 0.01 ~ "**",
+  cilia_glp1r_comparisons_females$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+cilia_glp1r_comparisons_females$Description = str_to_title(cilia_glp1r_comparisons_females$Description)
+
+cilia_glp1r_comparisons_females = cilia_glp1r_comparisons_females %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    contrast == "effect_of_sex_old_ntg" ~ "14 Month Ntg F vs 14 Month Ntg M",
+    contrast == "effect_of_sex_old_5x" ~ "14 Month 5X F vs 14 Month 5X M",
+    contrast == "effect_of_sex_young_ntg" ~ "6 Month Ntg F vs 6 Month Ntg M",
+    contrast == "effect_of_sex_young_5x" ~ "6 Month 5X F vs 6 Month 5X M",
+    .default = contrast
+  )
+)
+```
+
+Ciliary alterations plot: 19_Orexin_Hypocretin axoneme assembly
+```{r}
+cilia_orexin_comparisons_females = all_gsea_results %>% filter(cluster == "19_Orexin_Hypocretin") %>% filter(p.adjust < 0.05) %>%
+    filter(contrast %in% c("prolonged_amyloid_contrast_f","early_amyloid_contrast_f","late_vs_early_amyloid_contrast_f","aging_contrast_f")) %>% 
+  filter(Description == "axoneme assembly")
+cilia_orexin_comparisons_females$sig_label = case_when(
+  cilia_orexin_comparisons_females$p.adjust < 0.001 ~ "***",
+  cilia_orexin_comparisons_females$p.adjust < 0.01 ~ "**",
+  cilia_orexin_comparisons_females$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+cilia_orexin_comparisons_females$Description = str_to_title(cilia_orexin_comparisons_females$Description)
+
+cilia_orexin_comparisons_females = cilia_orexin_comparisons_females %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    contrast == "effect_of_sex_old_ntg" ~ "14 Month Ntg F vs 14 Month Ntg M",
+    contrast == "effect_of_sex_old_5x" ~ "14 Month 5X F vs 14 Month 5X M",
+    contrast == "effect_of_sex_young_ntg" ~ "6 Month Ntg F vs 6 Month Ntg M",
+    contrast == "effect_of_sex_young_5x" ~ "6 Month 5X F vs 6 Month 5X M",
+    .default = contrast
+  )
+)
+```
+
+Plot all together in same patchwork
+```{r}
+library(ggtext)
+library(patchwork)
+
+# Shared contrast factor levels (controls x-axis order and alignment)
+contrast_levels <- c("14 Month 5X vs 6 Month 5X F", 
+                     "14 Month 5X vs Ntg F", 
+                     "14 Month Ntg vs 6 Month Ntg F", 
+                     "6 Month 5X vs Ntg F")
+
+# Shared NES limit
+nes_max <- max(abs(c(
+  cilia_histaminergic_comparisons_females$NES,
+  cilia_orexin_comparisons_females$NES,
+  cilia_glp1r_comparisons_females$NES
+)))
+
+# Prepare each dataset with shared factor
+df_hist <- cilia_histaminergic_comparisons_females %>% 
+  filter(contrast %in% contrast_levels) %>%
+  mutate(contrast = factor(contrast, levels = contrast_levels))
+
+df_orex <- cilia_orexin_comparisons_females %>% 
+  filter(contrast %in% contrast_levels) %>%
+  mutate(contrast = factor(contrast, levels = contrast_levels))
+
+df_glp1r <- cilia_glp1r_comparisons_females %>% 
+  filter(contrast %in% contrast_levels) %>%
+  mutate(contrast = factor(contrast, levels = contrast_levels))
+
+# Common pieces
+common_fill <- scale_fill_distiller(
+  palette = "RdBu", direction = -1,
+  limits = c(-nes_max, nes_max), name = "NES"
+)
+
+common_theme <- theme_minimal(base_family = "Helvetica", base_size = 20) +
+  theme(
+    axis.text.y = element_text(face = "bold", color = "black"),
+    panel.grid = element_blank(),
+    legend.text = element_text(size = 18, face = "bold"),
+    legend.title = element_text(size = 20, face = "bold"),
+    plot.title = element_markdown(face = "bold", size = 25, hjust = 0.5,margin = margin(t = 0))
+  )
+
+# Plot 1
+p1 <- ggplot(df_hist, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  common_fill +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15), drop = FALSE) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "Histaminergic Neurons") +
+  common_theme +
+  theme(axis.text.x = element_blank())
+
+# Plot 2
+p2 <- ggplot(df_orex, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  common_fill +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15), drop = FALSE) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "Hypocretin/Orexin Neurons") +
+  common_theme +
+  theme(axis.text.x = element_blank())
+
+# Plot 3
+p3 <- ggplot(df_glp1r, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  common_fill +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15), drop = FALSE) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "*Glp1r*+/*Lepr*+ Neurons") +
+  common_theme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 20,
+                                    face = "bold", color = "black"))
+# Combine
+combined_plot <- p1 / p2 / p3 +
+  plot_layout(heights = c(1, 1, 1), guides = "collect") &
+  theme(legend.position = "right")
+
+ggsave("cilia-combined-aligned.pdf", combined_plot, width = 10, height = 9)
+```
+
+
+Show NES of ciliary pathways relative to significant results
+```{r}
+library(tidyverse)
+
+# --- Curated ciliary hits, per cluster -------------------------------------
+cilia_terms_by_cluster <- tribble(
+  ~cluster,                ~Description,
+  "44_Glp1r_Lepr",         "axoneme assembly",
+  "15_Histaminergic",      "axoneme assembly",
+  "19_Orexin_Hypocretin",  "axoneme assembly"
+) %>% mutate(is_cilia = TRUE)
+
+# --- Scope and labels ------------------------------------------------------
+ciliary_clusters_selected <- c("44_Glp1r_Lepr",
+                    "15_Histaminergic",
+                    "19_Orexin_Hypocretin")
+
+contrast_labels <- c("early_amyloid_contrast_f"         = "6 Month 5X vs Ntg F",
+                     "prolonged_amyloid_contrast_f"     = "14 Month 5X vs Ntg F",
+                     "late_vs_early_amyloid_contrast_f" = "14 Month 5X vs 6 Month 5X F",
+                     "aging_contrast_f"                 = "14 Month Ntg vs 6 Month Ntg F")
+
+# --- Plotting frame --------------------------------------------------------
+cilia_df <- all_gsea_results %>%
+  filter(cluster %in% ciliary_clusters_selected, contrast %in% names(contrast_labels)) %>%
+  left_join(cilia_terms_by_cluster, by = c("cluster", "Description")) %>%
+  mutate(
+    is_cilia       = replace_na(is_cilia, FALSE),
+    neglog_fdr     = -log10(p.adjust),
+    contrast_label = factor(contrast_labels[contrast], levels = unname(contrast_labels))
+  )
+
+cilia_df = cilia_df %>% mutate(cluster = case_when(
+  cluster == "19_Orexin_Hypocretin" ~ "Hypocretin/Orexin Neurons",
+  cluster == "15_Histaminergic" ~ "Histaminergic Neurons",
+  cluster == "44_Glp1r_Lepr" ~ "Glp1r+/Lepr+ Neurons"
+))
+
+cilia_bg     <- filter(cilia_df, !is_cilia)
+cilia_fg     <- filter(cilia_df,  is_cilia)
+cilia_bg_sig <- filter(cilia_df, !is_cilia, p.adjust < 0.05)
+cilia_fg_sig <- filter(cilia_df,  is_cilia, p.adjust < 0.05)
+
+theme_cilia <- theme_minimal(base_family = "Helvetica", base_size = 14) +
+  theme(axis.text          = element_text(face = "bold", color = "black",size = 25),
+        axis.title         = element_text(face = "bold", size = 17),
+        panel.grid.major.y = element_line(color = "grey90"),
+        panel.grid.minor   = element_blank(),
+        strip.text         = element_text(face = "bold", size = 25),
+        plot.title         = element_text(face = "bold", size = 18, hjust = 0.5),
+        plot.subtitle      = element_text(size = 11, hjust = 0.5))
+
+
+# --- Plot 2: direction of effect, significant terms only -------------------
+cilia_nes_plot <- ggplot(cilia_df, aes(NES, cluster)) +
+  geom_vline(xintercept = 0, color = "grey30", linewidth = 0.5) +
+  geom_jitter(data = cilia_bg_sig, width = 0,
+              height = 0.18, size = 1.5, alpha = 0.28, color = "grey65") +
+  geom_jitter(data = cilia_fg_sig, width = 0,
+              height = 0.18, size = 6, alpha = 0.95,
+              shape = 21, fill = "#C0392B", color = "black", stroke = 0.5) +
+  facet_wrap(~ contrast_label, ncol = 2,
+             labeller = labeller(contrast_label = label_wrap_gen(50))) +
+  scale_x_continuous(expand = expansion(mult = 0.05)) +
+    scale_y_discrete(labels = function(x) str_wrap(x, width = 20)) + #wrap text to new line after 20 characters 
+  labs(x = "Normalized enrichment score (NES)", y = NULL) +
+  theme_cilia
+
+ggsave("cilia-nes-among-significant.pdf", cilia_nes_plot, width = 16, height = 11)
+```
+
+Other result of particular interest:
+Biosynthesis consistent changes in cholesterol metabolism in MCH neurons - the only significant results found in both sexes at 14 months
+```{r}
+selected_terms = all_gsea_results %>% filter(cluster == "40_Mch") %>% filter(p.adjust < 0.05) %>%
+  filter(contrast %in% c("prolonged_amyloid_contrast_m","prolonged_amyloid_contrast_f")) %>% count(Description) %>%  filter(n == 2) %>% pull(Description)
+
+# Add males same comparison
+biosynthesis_mch_comparisons_both_sexes = all_gsea_results %>%
+  filter(cluster == "40_Mch") %>%
+  filter(contrast %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f","early_amyloid_contrast_m","early_amyloid_contrast_f","late_vs_early_amyloid_contrast_m","late_vs_early_amyloid_contrast_f","aging_contrast_m","aging_contrast_f","effect_of_sex_young_ntg","effect_of_sex_young_5x","effect_of_sex_old_ntg","effect_of_sex_old_5x"
+)) %>%
+  filter(Description %in% selected_terms)
+
+
+biosynthesis_mch_comparisons_both_sexes$sig_label = case_when(
+  biosynthesis_mch_comparisons_both_sexes$p.adjust < 0.001 ~ "***",
+  biosynthesis_mch_comparisons_both_sexes$p.adjust < 0.01 ~ "**",
+  biosynthesis_mch_comparisons_both_sexes$p.adjust < 0.05 ~ "*",
+  TRUE ~ ""
+)
+biosynthesis_mch_comparisons_both_sexes$Description = str_to_title(biosynthesis_mch_comparisons_both_sexes$Description)
+
+biosynthesis_mch_comparisons_both_sexes = biosynthesis_mch_comparisons_both_sexes %>% mutate(
+  contrast = case_when(
+    contrast == "prolonged_amyloid_contrast_m" ~ "14 Month 5X vs Ntg M",
+    contrast == "prolonged_amyloid_contrast_f" ~ "14 Month 5X vs Ntg F",
+    contrast == "early_amyloid_contrast_m" ~ "6 Month 5X vs Ntg M",
+    contrast == "early_amyloid_contrast_f" ~ "6 Month 5X vs Ntg F",
+    contrast == "late_vs_early_amyloid_contrast_m" ~ "14 Month 5X vs 6 Month 5X M",
+    contrast == "late_vs_early_amyloid_contrast_f" ~ "14 Month 5X vs 6 Month 5X F",
+    contrast == "aging_contrast_m" ~ "14 Month Ntg vs 6 Month Ntg M",
+    contrast == "aging_contrast_f" ~ "14 Month Ntg vs 6 Month Ntg F",
+    contrast == "effect_of_sex_old_ntg" ~ "14 Month Ntg F vs 14 Month Ntg M",
+    contrast == "effect_of_sex_old_5x" ~ "14 Month 5X F vs 14 Month 5X M",
+    contrast == "effect_of_sex_young_ntg" ~ "6 Month Ntg F vs 6 Month Ntg M",
+    contrast == "effect_of_sex_young_5x" ~ "6 Month 5X F vs 6 Month 5X M",
+    .default = contrast
+  )
+)
+
+selected_contrasts = c("14 Month 5X vs Ntg M", "14 Month 5X vs Ntg F") 
+
+selected_biosynthesis_pathways_5x_14_mo_plot <- ggplot(biosynthesis_mch_comparisons_both_sexes %>% filter(contrast %in% selected_contrasts), aes(x = contrast, y = Description, fill = NES)) + 
+  geom_tile(color = "white", linewidth = 0.3) + 
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") + 
+  # Diverging Red-Blue palette for NES (Normalized Enrichment Score) 
+  scale_fill_distiller( 
+    palette = "RdBu",  
+    direction = -1,  
+    limits = c(-max(abs(biosynthesis_mch_comparisons_both_sexes$NES)),  
+              max(abs(biosynthesis_mch_comparisons_both_sexes$NES))), 
+    name = "NES" 
+  ) + 
+  labs( 
+    x = "",  
+    y = "",  
+    title = expression(bolditalic("Pmch") * bold("+ Neurons"))
+  ) + 
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) + #wrap text to new line after 20 characters  
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) + #wrap text to new line after 20 characters 
+  theme_minimal(base_family = "Helvetica",base_size = 15) + 
+  theme( 
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, face = "bold",color = "black",size = 16),     axis.text.y = element_text(face = "bold",color = "black",size = 16), 
+    axis.title = element_text(face = "bold",size = 18), 
+    panel.grid = element_blank(), 
+    legend.text = element_text(size = 15, face = "bold"), 
+    legend.title = element_text(size = 17, face = "bold"), 
+    plot.title = element_text(face = "bold", size = 20,hjust=.5), 
+    strip.text = element_text(face = "bold") 
+  ) 
+
+#Curated sterol/cholesterol hits 
+sterol_terms <- c("zymosterol metabolic process", 
+                  "zymosterol biosynthetic process", 
+                  "sterol metabolic process", 
+                  "sterol biosynthetic process", 
+                  "steroid biosynthetic process", 
+                  "secondary alcohol metabolic process", 
+                  "secondary alcohol biosynthetic process", 
+                  "cholesterol metabolic process", 
+                  "cholesterol biosynthetic process via lathosterol", 
+                  "cholesterol biosynthetic process via desmosterol", 
+                  "cholesterol biosynthetic process") 
+
+mch_contrast_labels <- c("prolonged_amyloid_contrast_f" = "14 Month 5X vs Ntg F", 
+                         "prolonged_amyloid_contrast_m" = "14 Month 5X vs Ntg M") 
+
+# --- Plotting frame -------------------------------------------------------- 
+sterol_df <- all_gsea_results %>% 
+  filter(cluster == "40_Mch", contrast %in% names(mch_contrast_labels)) %>% 
+  mutate( 
+    is_sterol      = Description %in% sterol_terms, 
+    contrast_label = factor(mch_contrast_labels[contrast], 
+                            levels = rev(unname(mch_contrast_labels))) 
+  ) 
+
+sterol_bg_sig <- filter(sterol_df, !is_sterol, p.adjust < 0.05) 
+sterol_fg_sig <- filter(sterol_df,  is_sterol, p.adjust < 0.05) 
+
+# --- Plot: direction of effect, significant terms only --------------------- 
+sterol_nes_plot <- ggplot(sterol_df, aes(NES, contrast_label)) + 
+  geom_vline(xintercept = 0, color = "grey30", linewidth = 0.5) + 
+  geom_jitter(data = sterol_bg_sig, width = 0,
+              height = 0.18, size = 0.7, alpha = 0.28, color = "grey65") + 
+  geom_jitter(data = sterol_fg_sig, width = 0,
+              height = 0.18, size = 3, alpha = 0.95, 
+              shape = 21, fill = "#C0392B", color = "black", stroke = 0.5) + 
+  scale_x_continuous(expand = expansion(mult = 0.05)) + 
+labs(x = "Normalized enrichment score (NES)", y = NULL, 
+title = expression(bolditalic("Pmch") * bold("+ Neurons"))) +
+ theme_cilia
+
+library(patchwork)
+
+ggsave("pmch-sterol-nes-among-significant.pdf", sterol_nes_plot, width = 8, height = 3)
+
+ggsave("mch-neurons-consistent.pdf",selected_biosynthesis_pathways_5x_14_mo_plot,  width = 10, height = 10)
+```
+
+Supplementary plot showing all comparisons
+```{r}
+# Supplementary: Ciliary (A) and Pmch (B) pathway heatmaps — all contrasts
+library(ggtext)
+library(patchwork)
+
+# ── All 12 contrasts and labels ───────────────────────────────────────────────
+all_contrasts <- c(
+  "early_amyloid_contrast_f", "prolonged_amyloid_contrast_f",
+  "late_vs_early_amyloid_contrast_f", "aging_contrast_f",
+  "early_amyloid_contrast_m", "prolonged_amyloid_contrast_m",
+  "late_vs_early_amyloid_contrast_m", "aging_contrast_m",
+  "effect_of_sex_young_ntg", "effect_of_sex_young_5x",
+  "effect_of_sex_old_ntg", "effect_of_sex_old_5x"
+)
+
+contrast_label_map <- c(
+  "early_amyloid_contrast_f"         = "6 Month 5X vs Ntg F",
+  "prolonged_amyloid_contrast_f"     = "14 Month 5X vs Ntg F",
+  "late_vs_early_amyloid_contrast_f" = "14 Month 5X vs 6 Month 5X F",
+  "aging_contrast_f"                 = "14 Month Ntg vs 6 Month Ntg F",
+  "early_amyloid_contrast_m"         = "6 Month 5X vs Ntg M",
+  "prolonged_amyloid_contrast_m"     = "14 Month 5X vs Ntg M",
+  "late_vs_early_amyloid_contrast_m" = "14 Month 5X vs 6 Month 5X M",
+  "aging_contrast_m"                 = "14 Month Ntg vs 6 Month Ntg M",
+  "effect_of_sex_young_ntg"          = "6 Month Ntg F vs 6 Month Ntg M",
+  "effect_of_sex_young_5x"           = "6 Month 5X F vs 6 Month 5X M",
+  "effect_of_sex_old_ntg"            = "14 Month Ntg F vs 14 Month Ntg M",
+  "effect_of_sex_old_5x"             = "14 Month 5X F vs 14 Month 5X M"
+)
+
+contrast_order <- unname(contrast_label_map)
+
+# ── Helper: pull & format for any cluster × terms ─────────────────────────────
+prep_supp_heatmap <- function(cluster_id, terms) {
+  all_gsea_results %>%
+    filter(cluster == cluster_id,
+           contrast %in% all_contrasts,
+           Description %in% terms) %>%
+    mutate(
+      sig_label   = case_when(p.adjust < 0.001 ~ "***",
+                              p.adjust < 0.01  ~ "**",
+                              p.adjust < 0.05  ~ "*",
+                              TRUE ~ ""),
+      Description = str_to_title(Description),
+      contrast    = contrast_label_map[contrast],
+      contrast    = factor(contrast, levels = contrast_order)
+    )
+}
+
+# ── Derive selected terms ─────────────────────────────────────────────────────
+orexin_cilia_terms <- c("axoneme assembly")
+
+mch_selected_terms <- all_gsea_results %>%
+  filter(cluster == "40_Mch", p.adjust < 0.05,
+         contrast %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f")) %>%
+  count(Description) %>%
+  filter(n == 2) %>%
+  pull(Description)
+
+# ── Prepare data ──────────────────────────────────────────────────────────────
+df_cilia_hist  <- prep_supp_heatmap("15_Histaminergic",     "axoneme assembly")
+df_cilia_orex  <- prep_supp_heatmap("19_Orexin_Hypocretin", orexin_cilia_terms)
+df_cilia_glp1r <- prep_supp_heatmap("44_Glp1r_Lepr",       "axoneme assembly")
+df_mch         <- prep_supp_heatmap("40_Mch",               mch_selected_terms)
+
+# ── Separate NES scales for panel A vs B ──────────────────────────────────────
+cilia_nes_max <- max(abs(c(df_cilia_hist$NES, df_cilia_orex$NES, df_cilia_glp1r$NES)))
+mch_nes_max   <- max(abs(df_mch$NES))
+
+fill_cilia <- scale_fill_distiller(
+  palette = "RdBu", direction = -1,
+  limits  = c(-cilia_nes_max, cilia_nes_max), name = "NES"
+)
+
+fill_mch <- scale_fill_distiller(
+  palette = "RdBu", direction = -1,
+  limits  = c(-mch_nes_max, mch_nes_max), name = "NES"
+)
+
+# ── Shared theme ──────────────────────────────────────────────────────────────
+supp_theme <- theme_minimal(base_family = "Helvetica", base_size = 18) +
+  theme(
+    axis.text.y  = element_text(face = "bold", color = "black"),
+    panel.grid   = element_blank(),
+    legend.text  = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 14, face = "bold"),
+    plot.title   = element_markdown(face = "bold", size = 30, hjust = 0.5),
+    plot.tag     = element_text(face = "bold", size = 22)
+  )
+
+# ── Panel A sub-plots: Ciliary pathways ───────────────────────────────────────
+pa1 <- ggplot(df_cilia_hist, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  fill_cilia +
+  scale_x_discrete(drop = FALSE, labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "Histaminergic Neurons", tag = "A") +
+  supp_theme +
+  theme(axis.text.x = element_blank())
+
+pa2 <- ggplot(df_cilia_orex, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  fill_cilia +
+  scale_x_discrete(drop = FALSE, labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "Hypocretin/Orexin Neurons") +
+  supp_theme +
+  theme(axis.text.x = element_blank())
+
+pa3 <- ggplot(df_cilia_glp1r, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  fill_cilia +
+  scale_x_discrete(drop = FALSE, labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "*Glp1r*+/*Lepr*+ Neurons") +
+  supp_theme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1,
+                                    face = "bold", color = "black"))
+
+# ── Panel B: Pmch biosynthesis pathways ───────────────────────────────────────
+pb1 <- ggplot(df_mch, aes(x = contrast, y = Description, fill = NES)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sig_label), size = 10, fontface = "bold", color = "black") +
+  fill_mch +
+  scale_x_discrete(drop = FALSE, labels = function(x) str_wrap(x, width = 15)) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 30)) +
+  labs(x = "", y = "", title = "*Pmch*+ Neurons", tag = "B") +
+  supp_theme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1.1, hjust = 1,
+                                    face = "bold", color = "black"))
+
+# ── Combine: nest A so its 3 subplots share one legend, B gets its own ────────
+panel_a <- (pa1 / pa2 / pa3) +
+  plot_layout(heights = c(1, 1, 1), guides = "collect") &
+  theme(legend.position = "right")
+
+panel_b <- pb1 + theme(legend.position = "right")
+
+supp_fig <- wrap_elements(panel_a) / wrap_elements(panel_b) +
+  plot_layout(heights = c(5, 11))
+
+ggsave("supp-cilia-mch-all-contrasts.pdf", supp_fig, width = 18, height = 28)
+ggsave("supp-cilia-mch-all-contrasts.png", supp_fig, width = 18, height = 28)
+```
+

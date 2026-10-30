@@ -1,0 +1,66 @@
+---
+title: "pathway level canonical neuron analysis"
+output: html_document
+date: "2026-09-18"
+---
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+set.seed(1)
+dreamlet_results<- qs2::qs_read("../shared objs and code/dreamlet_de_results_all_contrasts.qs2")
+dreamlet_results = dreamlet_results %>% filter(cluster%in% c("40_Mch","19_Orexin_Hypocretin","15_Histaminergic","100_Avp_Magnocellular","101_Oxt_Magnocellular","2_Ghrh_Galanin Neurons","41_Agrp_Npy","41_Agrp_Npy","54_Pomc_Cartpt","8_Prlh", "55_KNDy","44_Glp1r_Lepr","36_Slc17a6_Nts", "51_Slc17a6_Ptger3_Gpr83"))
+#didn't include some neurons (ex: Gnrh/ TIDA) bc low counts 
+
+clusters_of_interest = dreamlet_results$cluster %>% unique
+
+
+# Loop over each contrast
+gsea_results_list <- list()
+
+comparisons_of_interest = dreamlet_results$comparison %>% unique
+for(cur_cluster in clusters_of_interest) {
+  cur_data = dreamlet_results %>% filter(cluster == cur_cluster)
+  for (contrast in comparisons_of_interest) {
+      cur_data_contrast <- cur_data %>%
+       filter(comparison == contrast) %>%
+        arrange(-logFC)
+    # Build named gene list (ranked by logFC)
+  
+    cur_genelist <- cur_data_contrast$logFC
+    names(cur_genelist) <- cur_data_contrast$gene
+    cur_genelist <- sort(cur_genelist, decreasing = TRUE)
+    
+    cur_fgsea = gseGO(geneList = cur_genelist,
+                          OrgDb = org.Mm.eg.db,
+                          ont = "BP",
+                          keyType = "SYMBOL",
+                          pAdjustMethod = "BH",
+                          pvalueCutoff = 1,#don't remove any 
+                          by = "fgsea",
+                          nPermSimple = 50000,
+                          seed = TRUE,
+                          eps = 1e-50,
+                          verbose = FALSE)
+    gsea_results_list[[cur_cluster]][[contrast]] <- cur_fgsea %>%
+        as.data.frame() %>%
+        mutate(contrast = contrast) %>% 
+        mutate(cluster = cur_cluster)
+  }
+  
+}
+all_gsea_results <- bind_rows(
+  lapply(names(gsea_results_list), function(cluster) {
+    bind_rows(gsea_results_list[[cluster]])
+  })
+)
+
+
+saveRDS(all_gsea_results, "gsea_results_canonical_neurons.rds") 
+
+qs2::qs_save(all_gsea_results,file =  "gsea_results_canonical_neurons.qs2")
+```

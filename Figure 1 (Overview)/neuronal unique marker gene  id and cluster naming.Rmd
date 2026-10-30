@@ -1,0 +1,219 @@
+---
+title: "neuronal unique marker gene combination id and cluster naming"
+output: html_document
+date: "2025-03-13"
+---
+
+Stratify by neurotransmitter and neuropeptides/receptors: name celltypes by nps expressed (thresholded to 25% of max np expression to filter out lowly expressed nps since many celltypes express nps at low levels), neurotransmitter expressed (slc17a6 or slc32a1), unless there's a canonical name. 
+
+Load final neuron assignments
+```{r setup}
+library(magrittr)
+library(BPCells)
+library(dplyr)
+library(ggplot2)
+library(scattermore)
+library(org.Mm.eg.db)
+library(dplyr)
+library(bluster)
+library(cluster)
+library(ggcorrplot)
+library(pheatmap)
+library(ggplotify)
+library(khroma)
+library(readr)
+library(stringr)
+library(tidyverse)
+library(biomaRt)
+library(collapse)
+library(ROI)
+library(ROI.plugin.glpk)
+library(ompr)
+library(ompr.roi)
+
+cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+np_fraction_of_max_threshold = .25
+set.seed(1)
+```
+
+```{r}
+neuropeptide_and_receptors_df= read_csv("./Neuropeptide_and_receptors.csv")
+#tidy so have 
+peptides = neuropeptide_and_receptors_df$Neuropeptide %>% unique()
+receptors = neuropeptide_and_receptors_df$`Neuropeptide Receptor` %>% str_split(",") %>% unlist() %>% unique()
+peptides_and_receptors = c(peptides, receptors) %>% unique
+```
+
+load ge, cpm normalize, filter for nps/recep.
+```{r}
+
+ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+ge = ge[,names(cluster_assignments)] #filter for neuronal cells
+norm_ge = multiply_cols(ge, 1/Matrix::colSums(ge)) 
+norm_ge = norm_ge * 1e6
+
+#subset nps and receptors
+peptides_and_receptors = peptides_and_receptors[peptides_and_receptors %in% rownames(norm_ge)]
+
+#add go terms
+ensembl <- useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl")
+gpcr_go <- getBM(
+  attributes = c("ensembl_gene_id", "external_gene_name", "mgi_id", "description"),
+  filters = "go",
+  values = "GO:0004930", #G protein-coupled receptor activity gene set
+  mart = ensembl
+)
+#remove olfactory genes + vomeronasal + taste
+cur_df_filtered <- gpcr_go[!grepl("olfactory", gpcr_go$description, ignore.case = TRUE), ]
+cur_df_filtered <- cur_df_filtered[!grepl("vomeronasal", cur_df_filtered$description, ignore.case = TRUE), ]
+cur_df_filtered <- cur_df_filtered[!grepl("taste", cur_df_filtered$description, ignore.case = TRUE), ]
+cur_df_filtered <- cur_df_filtered[!grepl("predicted", cur_df_filtered$description, ignore.case = TRUE), ]
+
+
+new_gene_list = c(peptides_and_receptors, cur_df_filtered$external_gene_name) %>% unique %>% .[. %in% rownames(norm_ge)]
+
+norm_ge_nps = norm_ge[new_gene_list,]
+
+#aggregate per cluster
+nps_pseudobulk = pseudobulk_matrix(norm_ge_nps, cell_groups = cluster_assignments, method = "mean", threads = 8L)
+
+#get 25% of max np exp for each cluster
+threshold_exp_each_np = rowMaxs(nps_pseudobulk) * np_fraction_of_max_threshold
+#if any has less than 10 cpm, set that as threshold 
+threshold_exp_each_np[threshold_exp_each_np < 10] = 10
+
+#if any has greater than 100 cpm, ste that as threshold
+threshold_exp_each_np[threshold_exp_each_np > 100] = 100
+```
+split into glut, gaba, both, or neither based on 25% exp level
+```{r}
+percent_cluster_exp_gaba_glut= pseudobulk_matrix(ge[c("Slc17a6","Slc32a1"),] > 0, cell_groups = cluster_assignments, method = "mean", threads = 8L)
+slc17_celltypes = percent_cluster_exp_gaba_glut["Slc17a6",] %>% .[. > .25] %>% names()
+slc32_celltypes = percent_cluster_exp_gaba_glut["Slc32a1",] %>% .[. > .25] %>% names()
+slc17_and_slc32_celltypes = intersect(slc17_celltypes, slc32_celltypes)
+slc17_celltypes = slc17_celltypes[!slc17_celltypes %in% slc17_and_slc32_celltypes]
+slc32_celltypes = slc32_celltypes[!slc32_celltypes %in% slc17_and_slc32_celltypes]
+
+#no celltypes express neither, all express at least one
+neither_slc_17_or_32_celltypes = colnames(percent_cluster_exp_gaba_glut)[! colnames(percent_cluster_exp_gaba_glut) %in% c(slc17_celltypes, slc32_celltypes, slc17_and_slc32_celltypes)]
+```
+
+Create binary matrix w/info on each np each cluster expresses above threshold separately for 17 vs 32 
+```{r}
+#subtract threshold from each row and binarize based on if exp >=0 
+A<- apply(nps_pseudobulk[,slc17_celltypes], 2,FUN = function(x, y) x = x - y, threshold_exp_each_np)
+A = A > 0
+unique_clusters = colnames(A)
+marker_genes_list_17 <- list()
+
+for(cur_cluster in unique_clusters) {
+  # Subset and process as in your code to obtain full_binary_mat for cur_cluster
+  genes_cur_cluster <- A[,cur_cluster] %>% .[. == T] %>% names
+  other_clusters_binary = A[genes_cur_cluster,!colnames(A) == cur_cluster]
+  other_clusters_binary = !other_clusters_binary #T if expressed in this cluster but not other cluster
+  full_binary_mat <- 1 * other_clusters_binary
+  
+  n_genes <- nrow(full_binary_mat)
+  n_other <- ncol(full_binary_mat)
+  
+  model <- MIPModel() %>%
+    add_variable(U[j], j = 1:n_genes, type = "binary") %>%
+    add_constraint(sum_expr(full_binary_mat[j, k] * U[j], j = 1:n_genes) >= 1, 
+                   k = 1:n_other) %>%
+    set_objective(sum_expr(U[j], j = 1:n_genes), "min")
+  
+  result <- solve_model(model, with_ROI(solver = "glpk"))
+  solution <- get_solution(result, U[j])
+  selected_genes <- rownames(full_binary_mat)[solution$value == 1]
+  marker_genes_list_17[[cur_cluster]] <- selected_genes
+}
+```
+
+```{r}
+#subtract threshold from each row and binarize based on if exp >=0 
+A<- apply(nps_pseudobulk[,slc32_celltypes], 2,FUN = function(x, y) x = x - y, threshold_exp_each_np)
+A = A > 0
+unique_clusters = colnames(A)
+marker_genes_list_32 <- list()
+
+for(cur_cluster in unique_clusters) {
+  # Subset and process as in your code to obtain full_binary_mat for cur_cluster
+  genes_cur_cluster <- A[,cur_cluster] %>% .[. == T] %>% names
+  other_clusters_binary = A[genes_cur_cluster,!colnames(A) == cur_cluster]
+  other_clusters_binary = !other_clusters_binary #T if expressed in this cluster but not other cluster
+  full_binary_mat <- 1 * other_clusters_binary
+  
+  n_genes <- nrow(full_binary_mat)
+  n_other <- ncol(full_binary_mat)
+  
+  model <- MIPModel() %>%
+    add_variable(U[j], j = 1:n_genes, type = "binary") %>%
+    add_constraint(sum_expr(full_binary_mat[j, k] * U[j], j = 1:n_genes) >= 1, 
+                   k = 1:n_other) %>%
+    set_objective(sum_expr(U[j], j = 1:n_genes), "min")
+  
+  result <- solve_model(model, with_ROI(solver = "glpk"))
+  solution <- get_solution(result, U[j])
+  selected_genes <- rownames(full_binary_mat)[solution$value == 1]
+  marker_genes_list_32[[cur_cluster]] <- selected_genes
+}
+```
+
+
+For the one celltype expressing both slc17 and slc32, evaluate markers across all
+```{r}
+#subtract threshold from each row and binarize based on if exp >=0 
+A<- apply(nps_pseudobulk, 2,FUN = function(x, y) x = x - y, threshold_exp_each_np)
+A = A > 0
+unique_clusters = slc17_and_slc32_celltypes
+marker_genes_list_others <- list()
+
+for(cur_cluster in unique_clusters) {
+  # Subset and process as in your code to obtain full_binary_mat for cur_cluster
+  genes_cur_cluster <- A[,cur_cluster] %>% .[. == T] %>% names
+  other_clusters_binary = A[genes_cur_cluster,!colnames(A) == cur_cluster]
+  other_clusters_binary = !other_clusters_binary #T if expressed in this cluster but not other cluster
+  full_binary_mat <- 1 * other_clusters_binary
+  
+  n_genes <- nrow(full_binary_mat)
+  n_other <- ncol(full_binary_mat)
+  
+  model <- MIPModel() %>%
+    add_variable(U[j], j = 1:n_genes, type = "binary") %>%
+    add_constraint(sum_expr(full_binary_mat[j, k] * U[j], j = 1:n_genes) >= 1, 
+                   k = 1:n_other) %>%
+    set_objective(sum_expr(U[j], j = 1:n_genes), "min")
+  
+  result <- solve_model(model, with_ROI(solver = "glpk"))
+  solution <- get_solution(result, U[j])
+  selected_genes <- rownames(full_binary_mat)[solution$value == 1]
+  marker_genes_list_others[[cur_cluster]] <- selected_genes
+}
+
+```
+
+Append glut or gaba name to each cluster id, then add np/recep genes for that cluster
+```{r}
+names(marker_genes_list_17) = paste0(names(marker_genes_list_17),"_Slc17a6_")
+names(marker_genes_list_32) = paste0(names(marker_genes_list_32),"_Slc32a1_")
+names(marker_genes_list_others) = paste0(names(marker_genes_list_others),"_Slc17a6_Slc32a1_")
+#combine all list
+full_marker_list = c(marker_genes_list_17, marker_genes_list_32, marker_genes_list_others)
+for(i in 1:length(full_marker_list)) {
+  names(full_marker_list)[i] = paste0(names(full_marker_list)[i], paste0(full_marker_list[[i]], collapse = "_"))
+}
+#create df with internal (numeric id) vs official name
+df_internal_and_official_name = data.frame(numeric_id = gsub("^(.*?)_.*", "\\1", names(full_marker_list)), official_name = names(full_marker_list))
+
+#overwrite some with canonical names
+canonical_df = data.frame(numeric_cluster_ids = c(2L,4L,13L,15L,19L,40L,41L,44L,54L,55L,100L,101L) %>% as.character(),canonical_name = c("Ghrh_Galanin Neurons", "Gnrh_Kiss1r", "TIDA_Dopaminergic", "Histaminergic","Orexin_Hypocretin","MCH", "Agrp_Npy","Glp1r_Lepr", "Pomc_Cartpt","KNDy", "Avp_Magnocellular","Oxt_Magnocellular")
+)
+
+df_internal_and_official_name$official_name[match(canonical_df$numeric_cluster_ids, df_internal_and_official_name$numeric_id)] = paste0(df_internal_and_official_name$numeric_id[match(canonical_df$numeric_cluster_ids, df_internal_and_official_name$numeric_id)],"_",canonical_df$canonical_name)
+
+#overwrote cluster 51 name manually
+
+write_csv(df_internal_and_official_name, "../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+```
+
+

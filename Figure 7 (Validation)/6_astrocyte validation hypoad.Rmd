@@ -1,0 +1,897 @@
+---
+title: "astrocyte validation hypoad"
+output: html_document
+date: "2026-08-27"
+---
+
+
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+library(harmony)
+library(dreamlet)
+library(SingleCellExperiment)
+set.seed(501)
+hypoad_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+hypoad_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+donor_metadata = readRDS("./hypoad_prepro/donor_metadata_hypoad_post_qc.rds")
+human_astro = hypoad_meta %>% filter(celltype== "Astrocyte")
+human_astro = human_astro %>% filter(is_primary_data)
+human_ge = hypoad_ge[,human_astro %>% rownames]
+
+mouse_ge =open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+astro_mouse = non_neuronal_cluster_assignments[grepl("astrocyte-",non_neuronal_cluster_assignments)]
+mouse_ge = mouse_ge[,names(astro_mouse)]
+```
+
+```{r}
+library(babelgene)
+
+ortho = orthologs(rownames(human_ge), species = "mouse", human = TRUE) %>%
+  select(human_symbol, mouse_symbol = symbol) %>%
+  filter(mouse_symbol %in% rownames(mouse_ge) & human_symbol %in% rownames(human_ge)) %>%
+  distinct() 
+
+one_to_one = ortho %>%   group_by(mouse_symbol) %>% filter(n() == 1) 
+one_to_one = one_to_one  %>%   group_by(human_symbol) %>% filter(n() == 1) 
+
+human_ge = human_ge[one_to_one$human_symbol,]
+mouse_ge = mouse_ge[one_to_one$mouse_symbol,]
+
+rownames(mouse_ge) = one_to_one$human_symbol
+
+human_meta = human_astro %>% mutate(species = "human")
+mouse_meta = data.frame(cell_id = colnames(mouse_ge), cluster = astro_mouse, species = "mouse")
+
+human_meta$cluster = "astro"
+human_meta = human_meta %>% rownames_to_column("cell_id") %>% select(cell_id, cluster, species)
+joint_meta = rbind(human_meta, mouse_meta)
+
+joint_ge = cbind(human_ge, mouse_ge)
+
+```
+
+harmony integration
+```{r}
+get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate 30 PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+pcs_astro = get_pcs_from_initial_dataset(joint_ge, n_var_genes = 5000)
+
+#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
+harmony_astro = RunHarmony(pcs_astro,meta_data = joint_meta$species)
+```
+
+-- update
+```{r}
+library(xgboost)
+library(ranger)
+library(glmnet)
+library(recipes)
+library(themis)
+library(caret)
+set.seed(501)
+
+# --- align embedding with metadata -------------------------------------------
+emb <- as.matrix(harmony_astro)
+colnames(emb) <- paste0("PC", seq_len(ncol(emb)))
+stopifnot(all(rownames(emb) == joint_meta$cell_id))
+
+mouse_idx <- which(joint_meta$species == "mouse")
+human_idx <- which(joint_meta$species == "human")
+
+X_mouse <- emb[mouse_idx, , drop = FALSE]#embedding
+y_mouse <- factor(joint_meta$cluster[mouse_idx])#cluster
+X_human <- emb[human_idx, , drop = FALSE]
+
+# --- 80/20 stratified train/test split ---------------------------------------
+train_idx <- createDataPartition(y_mouse, p = 0.8, list = FALSE)[, 1]
+
+X_train_raw <- X_mouse[train_idx, ]
+y_train_raw <- y_mouse[train_idx]
+X_test      <- X_mouse[-train_idx, ]
+y_test      <- y_mouse[-train_idx]
+
+# --- SMOTE balancing on training set only ------------------------------------
+train_df <- as.data.frame(X_train_raw)
+train_df$cluster <- y_train_raw
+
+train_df_capped <- train_df %>%
+  group_by(cluster) %>%
+  slice_sample(n = 5000) %>%
+  ungroup()
+
+smote_rec <- recipe(cluster ~ ., data = train_df_capped) %>%
+  step_smote(cluster, over_ratio = 1) %>%
+  prep()
+
+train_balanced <- juice(smote_rec)
+X_train <- as.matrix(train_balanced %>% select(-cluster))
+y_train <- train_balanced$cluster
+
+# --- XGBoost -----------------------------------------------------------------
+y_levels    <- levels(factor(y_train))
+y_train_int <- as.integer(factor(y_train, levels = y_levels)) - 1L
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train_int)
+
+params <- list(
+  objective   = "multi:softprob",
+  num_class   = length(y_levels),
+  eval_metric = "mlogloss"
+)
+
+cv_xgb <- xgb.cv(
+  params  = params,
+  data    = dtrain,
+  nrounds = 500,
+  nfold   = 5,
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+xgb_model <- xgb.train(
+  params  = params,
+  data    = dtrain,
+  nrounds = cv_xgb$early_stop$best_iteration
+)
+
+P_xgb_test    <- predict(xgb_model, newdata = X_test)
+xgb_test_pred <- factor(y_levels[max.col(P_xgb_test)], levels = levels(y_test))
+
+# --- Random Forest (ranger) --------------------------------------------------
+rf_model <- ranger(
+  x = X_train,
+  y = factor(y_train),
+  classification = TRUE,
+  seed = 501
+)
+
+rf_test_pred <- predict(rf_model, data = X_test)$predictions
+rf_test_pred <- factor(rf_test_pred, levels = levels(y_test))
+
+# --- Ridge GLMNet ------------------------------------------------------------
+cvfit <- cv.glmnet(
+  x = X_train, y = y_train,
+  family = "multinomial", type.measure = "class",
+  alpha = 0, nfolds = 5, parallel = FALSE
+)
+
+P_glm_test    <- drop(predict(cvfit, newx = X_test, s = "lambda.min", type = "response"))
+glm_test_pred <- factor(colnames(P_glm_test)[max.col(P_glm_test)], levels = levels(y_test))
+
+# --- Compare all three on held-out mouse test set ----------------------------
+cm_xgb <- confusionMatrix(xgb_test_pred, y_test)
+cm_rf  <- confusionMatrix(rf_test_pred,  y_test)
+cm_glm <- confusionMatrix(glm_test_pred, y_test)
+
+summary_df <- data.frame(
+  model             = c("XGBoost", "Random Forest", "Ridge GLMNet"),
+  accuracy          = c(cm_xgb$overall["Accuracy"],
+                        cm_rf$overall["Accuracy"],
+                        cm_glm$overall["Accuracy"]),
+  kappa             = c(cm_xgb$overall["Kappa"],
+                        cm_rf$overall["Kappa"],
+                        cm_glm$overall["Kappa"]),
+  balanced_accuracy = c(mean(cm_xgb$byClass[, "Balanced Accuracy"], na.rm = TRUE),
+                        mean(cm_rf$byClass[, "Balanced Accuracy"],  na.rm = TRUE),
+                        mean(cm_glm$byClass[, "Balanced Accuracy"], na.rm = TRUE))
+)
+
+print(summary_df)
+
+# Per-class F1 for each model
+f1_df <- data.frame(
+  class     = rownames(cm_xgb$byClass),
+  f1_xgb    = cm_xgb$byClass[, "F1"],
+  f1_rf     = cm_rf$byClass[, "F1"],
+  f1_glmnet = cm_glm$byClass[, "F1"]
+)
+
+print(f1_df)
+```
+Top performing class: xgboost, although astrocyte-5 has lowest f1 scores across all (prob because very rare)
+
+
+
+```{r}
+library(ranger)
+
+# --- align embedding with metadata -------------------------------------------
+emb <- as.matrix(harmony_astro)
+colnames(emb) <- paste0("PC", seq_len(ncol(emb)))   # drop the space in "PC_ 1"
+stopifnot(all(rownames(emb) == joint_meta$cell_id)) # RunHarmony preserves row order
+
+mouse_idx <- which(joint_meta$species == "mouse")
+human_idx <- which(joint_meta$species == "human")
+
+X_mouse <- emb[mouse_idx, , drop = FALSE]
+y_mouse <- factor(joint_meta$cluster[mouse_idx])
+X_human <- emb[human_idx, , drop = FALSE]
+
+table(y_mouse)
+```
+
+```{r}
+library(glmnet)
+library(recipes)
+library(themis)
+library(dplyr)
+set.seed(501)
+
+# 1. Combine mouse embeddings and labels into a single dataframe
+mouse_df <- as.data.frame(X_mouse)
+mouse_df$cluster <- y_mouse
+
+# 2. Cap the maximum number of cells per cluster at 5000
+# slice_sample(n = 5000) keeps exactly 5000 cells for large clusters, 
+# and retains all cells for clusters with fewer than 5000.
+mouse_df_capped <- mouse_df %>%
+  group_by(cluster) %>%
+  slice_sample(n = 5000) %>%
+  ungroup()
+
+# 3. Build and prep a recipe to apply SMOTE
+# By capping the majority class at 5000 first, step_smote (with over_ratio = 1) 
+# will synthesize new cells for the smaller clusters until they also reach 5000.
+smote_rec <- recipe(cluster ~ ., data = mouse_df_capped) %>%
+  step_smote(cluster, over_ratio = 1) %>% 
+  prep()
+
+# Extract the fully balanced dataset
+mouse_balanced <- juice(smote_rec)
+
+# 4. Separate back into predictor matrix and target vector
+X_mouse_sm <- as.matrix(mouse_balanced %>% select(-cluster))
+y_mouse_sm <- mouse_balanced$cluster
+```
+
+xgboost
+```{r}
+library(xgboost)
+set.seed(501)
+
+# xgboost needs 0-indexed integer labels
+y_levels   <- levels(factor(y_mouse_sm))
+y_mouse_int <- as.integer(factor(y_mouse_sm, levels = y_levels)) - 1L
+
+dtrain <- xgb.DMatrix(data = X_mouse_sm, label = y_mouse_int)
+
+params <- list(
+  objective   = "multi:softprob",
+  num_class   = length(y_levels),
+  eval_metric = "mlogloss"
+)
+
+# 5-fold CV to pick the number of rounds
+cv <- xgb.cv(
+  params  = params,
+  data    = dtrain,
+  nrounds = 500,
+  nfold   = 5,
+  early_stopping_rounds = 20
+)
+
+best_n <- cv$early_stop$best_iteration
+
+xgb_model <- xgb.train(
+  params  = params,
+  data    = dtrain,
+  nrounds = best_n
+)
+
+# 6. Predict for human astrocytes
+P_xgb <- predict(xgb_model, newdata = X_human)
+colnames(P_xgb) <- y_levels
+rownames(P_xgb) <- rownames(X_human)
+
+human_xgb_classes<- y_levels[max.col(P_xgb, ties.method = "first")]
+names(human_xgb_classes) = P_xgb %>% rownames
+```
+
+
+```{r}
+# --- log-normalised human matrix, full gene space ----------------------------
+human_norm <- hypoad_ge[, human_meta$cell_id]
+
+human_norm <- multiply_cols(human_norm, 1 / Matrix::colSums(human_norm))
+
+human_norm <- log1p(human_norm * 1e4)
+
+#z-score then pseudobulk
+
+
+
+# --- ortholog panel -----------------------------------------------------------
+gene_panel_mouse <- c("Arhgef28","Tsc22d3","Tspo","C3","Myoc","Ifit1","Ifit3",
+                      "Serpina3n","Chi3l1","Frmpd1","Folh1","Tshz2","Pla2g7",
+                      "Gsdme","Unc13c","Deptor","Fos","Nr4a1","Gfap","Vim",
+                      "Aqp4","Xist","Tsix","Uty")
+
+panel_map <- orthologs(gene_panel_mouse, species = "mouse", human = FALSE) %>%
+  select(mouse_symbol = symbol, human_symbol) %>%
+  bind_rows(tribble(~mouse_symbol, ~human_symbol,
+                    "Xist",      "XIST",
+                    "Tsix",      "TSIX",
+                    "Uty",       "UTY",
+                    "Serpina3n", "SERPINA3",
+                    "Chi3l1",    "CHI3L1")) %>%
+  distinct(mouse_symbol, human_symbol) %>%
+  filter(human_symbol %in% rownames(human_norm)) %>%
+  mutate(mouse_symbol = factor(mouse_symbol, levels = gene_panel_mouse)) %>%
+  arrange(mouse_symbol) %>%
+  mutate(gene_label = fct_inorder(paste0(mouse_symbol, " (", human_symbol, ")")))
+
+message("unmapped: ", paste(setdiff(gene_panel_mouse, panel_map$mouse_symbol), collapse = ", "))
+
+# --- z-score once, reuse for all three panels ---------------------------------
+mat <- as(human_norm[unique(panel_map$human_symbol), ], "dgCMatrix")
+z   <- (as.matrix(mat) - rowMeans(mat)) / apply(mat, 1, sd)
+z[!is.finite(z)] <- 0
+colnames(z) <- colnames(human_norm)
+
+# --- tidy predictions
+
+human_meta$xgb_prediction = human_xgb_classes
+preds_all <- human_meta %>%
+  select(cell_id, xgb_prediction) %>%
+  pivot_longer(-cell_id, names_to = "method", values_to = "pred") %>%
+  filter(!is.na(pred)) %>%
+  mutate(pred   = as.character(pred),
+         method = recode(method,
+                         xgb_prediction = "xgboost") %>% fct_inorder())
+
+#get ge + ln pseudobulk matrix for graph
+preds_all_tidy = z %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("cell_id") %>% 
+  pivot_longer(-cell_id, names_to = "gene", values_to = "z_expr")
+
+preds_all_tidy$predicted_class = preds_all$pred[match(preds_all_tidy$cell_id,preds_all$cell_id)]
+
+cluster_level_z = preds_all_tidy %>% select(-cell_id) %>%  group_by(gene, predicted_class) %>% summarize(mean_z_expr = mean(z_expr))
+# --- plot ---------------------------------------------------------------------
+cluster_level_z$gene = factor(cluster_level_z$gene, levels = c(panel_map$human_symbol))
+
+#filter just to serpina3/chi3l1
+astro_plot_data = cluster_level_z %>% filter(gene %in% c("SERPINA3","CHI3L1"))
+
+# --- compute percent expressed per cluster for the two genes ------------------
+raw_binary_expr <-  hypoad_ge[c("SERPINA3", "CHI3L1"),human_meta$cell_id] > 0
+predicted_annotations_per_cell = preds_all_tidy$predicted_class[match(colnames(raw_binary_expr), preds_all_tidy$cell_id)]
+percent_exp_per_cluster = raw_binary_expr %>% pseudobulk_matrix(cell_groups = predicted_annotations_per_cell,method = "mean")
+percent_exp_per_cluster = percent_exp_per_cluster %>% t() %>% as.data.frame() %>% rownames_to_column("predicted_class") %>%   pivot_longer(- "predicted_class", names_to = "gene",values_to = "percent_exp")
+astro_plot_data = astro_plot_data %>% left_join(percent_exp_per_cluster, by = c("predicted_class","gene"))
+astro_marker_map_xgb = ggplot(astro_plot_data, aes(x = gene, y = predicted_class, fill = mean_z_expr, size = percent_exp)) +
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(max_size = 20, name = "Fraction\nExpressed") +
+  scale_fill_gradient2(low = "#3B4CC0", mid = "grey95", high = "#B40426",
+                       midpoint = 0,limits = c(-2,2), name = "Mean z-scored\nlog-normalized\nexpression") +
+  labs(x = "",
+       y = "Predicted Cluster (Human Nuclei Mapped to Mouse Annotations)") +
+  theme_minimal(base_size = 18) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "bold.italic", color = "black", size = 18),
+        axis.text.y = element_text(face = "bold", color = "black", size = 18),
+        axis.title.y = element_text(face = "bold", color = "black", size = 20),
+        legend.text = element_text(face = "bold"),
+        legend.title = element_text(face = "bold"),
+        panel.grid = element_blank(),
+        strip.text = element_text(face = "bold", hjust = 0))
+
+```
+
+
+
+```{r}
+library(sccomp)
+rna_and_pmi_info = read_csv("./hypoad_prepro/rna and pmi donor info.csv")
+rna_and_pmi_info = rna_and_pmi_info[1:14,]
+rna_and_pmi_info$pmi_hours_format= rna_and_pmi_info$pmi_hours_format %>% as.character()
+#from stack overflow
+rna_and_pmi_info$pmi_hours_decimal = 
+sapply(strsplit(rna_and_pmi_info$pmi_hours_format,":"),
+  function(x) {
+    x <- as.numeric(x)
+    x[1]+x[2]/60
+    }
+)
+
+donor_metadata$pmi_hours = rna_and_pmi_info$pmi_hours_decimal[match(donor_metadata$donor_id, rna_and_pmi_info$cell_meta_id)]
+donor_metadata$pmi_hours = scale(donor_metadata$pmi_hours)
+
+# --- donor-level metadata with recoded ad variable ---------------------------
+donor_info <- donor_metadata %>%
+  select(donor_id, condition, age, pmi_hours) %>%
+  distinct() %>%
+  mutate(ad = case_when(
+    condition %in% c("AD", "AD_44") ~ "ad",
+    condition == "CTL"              ~ "ctl"
+  )) %>%
+  filter(!is.na(ad)) %>%
+  mutate(ad = factor(ad, levels = c("ctl", "ad")),
+         donor_id = paste0("donor_", donor_id) %>% as.factor())
+  
+#scale age
+donor_info$age = scale(donor_info$age)
+
+# --- cell-to-donor link ------------------------------------------------------
+cell_donor <- hypoad_meta %>%
+  filter(celltype == "Astrocyte", is_primary_data) %>%
+  rownames_to_column("cell_id") %>%
+  mutate(donor_id = paste0("donor_", donor_id) %>% as.factor()) %>%
+  select(cell_id, donor_id)
+
+cell_donor$astrocyte_mapped_cluster = human_meta$xgb_prediction[match(cell_donor$cell_id,human_meta$cell_id)]
+
+cell_donor = cell_donor %>% left_join(donor_info, by = "donor_id")
+
+# --- formula and contrasts ----------------------------------------------------
+sccomp_formula <- as.formula("~ ad + age + pmi_hours")
+
+contrasts_list <- list(
+  "ad_vs_ctl" = "adad"
+)
+
+
+cluster_counts <- cell_donor %>%
+  group_by(donor_id, astrocyte_mapped_cluster) %>%
+  summarize(count = n()) %>%
+  ungroup() %>%
+  complete(donor_id, astrocyte_mapped_cluster, fill = list(count = 0))
+
+cluster_counts = cluster_counts %>% left_join(donor_info, by = "donor_id")
+
+model <- cluster_counts %>%
+  sccomp_estimate(
+    formula_composition = sccomp_formula,
+    sample     = "donor_id",
+    cell_group = "astrocyte_mapped_cluster",
+    abundance  = "count",
+    bimodal_mean_variability_association = TRUE
+  )
+model <- model %>% sccomp_remove_outliers(percent_false_positive = 10)
+
+contrast_formula = "adad"
+contrast_result <- model %>%
+    sccomp_test(contrast_formula, test_composition_above_logit_fold_change = 0)
+contrast_result$contrast <- "ad"
+```
+
+
+
+```{r}
+library(voomCLR)
+library(limma)
+
+voomclr_formula <- as.formula("~ age + ad + pmi_hours")
+
+# cluster = rows, donor = cols
+counts_wide <- cluster_counts %>%
+  select(astrocyte_mapped_cluster, donor_id, count) %>%
+  pivot_wider(names_from = donor_id, values_from = count, values_fill = 0) %>%
+  column_to_rownames(var = "astrocyte_mapped_cluster")
+
+# design matrix — one row per donor, ordered to match columns
+meta <- cluster_counts %>%
+  distinct(donor_id, .keep_all = TRUE) %>%
+  arrange(match(donor_id, colnames(counts_wide)))
+
+design_mat <- model.matrix(voomclr_formula, data = meta)
+colnames(design_mat) <- make.names(colnames(design_mat))
+
+# voomCLR
+v <- voomCLR(counts_wide, design = design_mat, varCalc = "analytical")
+fit <- lmFit(v, design_mat)
+
+# contrast: ad - ctl
+contrasts <- makeContrasts(ad_vs_ctl = adad, levels = design_mat)
+contFit <- contrasts.fit(fit, contrasts = contrasts)
+contFit <- eBayes(contFit)
+
+voomclr_results <- topTableBC(contFit, coef = 1, n = Inf,
+                 bootstrap = "parametric",
+                 voomWeights = v$weights,
+                 contrastMatrix = contrasts[, 1, drop = FALSE],
+                 adjust.method = "BH") %>%
+  rownames_to_column(var = "cluster") %>%
+  mutate(contrast = "ad_vs_ctl")
+
+```
+
+
+```{r}
+library(ANCOMBC)
+library(TreeSummarizedExperiment)
+
+count_mat <- cluster_counts %>%
+  select(astrocyte_mapped_cluster, donor_id, count) %>%
+  pivot_wider(names_from = donor_id, values_from = count, values_fill = 0) %>%
+  column_to_rownames("astrocyte_mapped_cluster") %>%
+  as.matrix()
+
+meta_df <- cluster_counts %>%
+  distinct(donor_id, .keep_all = TRUE) %>%
+  column_to_rownames("donor_id")
+meta_df <- meta_df[colnames(count_mat), ]
+meta_df$ad <- relevel(factor(meta_df$ad), ref = "ctl")
+
+tse <- TreeSummarizedExperiment(
+  assays  = list(counts = count_mat),
+  colData = meta_df
+)
+
+out <- ancombc2(
+  data        = tse,
+  assay_name  = "counts",
+  fix_formula = "ad + age + pmi_hours",
+  p_adj_method = "BH",
+  verbose     = FALSE
+)
+term_name = "adad"
+ancombc_results <- out$res %>%
+  select(taxon,
+         lfc = starts_with("lfc_adad"),
+         se  = starts_with("se_adad"),
+         p_val = starts_with("p_adad"),
+         q_val = starts_with("q_adad")) %>%
+  mutate(cluster  = taxon,
+         contrast = "ad_vs_ctl") %>%
+  select(cluster, contrast, lfc, se, p_val, q_val)
+```
+
+
+```{r}
+# --- collect and standardise across all 3 frameworks -------------------------
+
+# sccomp
+sccomp_collected <- contrast_result %>%
+  mutate(
+    framework   = "sccomp",
+    cluster     = astrocyte_mapped_cluster,
+    direction   = ifelse(c_effect > 0, "up", "down"),
+    adj_p_val   = c_FDR,
+    raw_p_val   = NA_real_
+  ) %>%
+  select(cluster, contrast, framework, direction, adj_p_val, raw_p_val)
+
+# voomCLR
+voomclr_collected <- voomclr_results %>%
+  mutate(
+    framework   = "voomclr",
+    direction   = ifelse(logFC > 0, "up", "down"),
+    adj_p_val   = adj.P.Val,
+    raw_p_val   = P.Value
+  ) %>%
+  select(cluster, contrast, framework, direction, adj_p_val, raw_p_val)
+
+# ANCOM-BC2
+ancombc_collected <- ancombc_results %>%
+  mutate(
+    framework   = "ancombc2",
+    direction   = ifelse(lfc > 0, "up", "down"),
+    adj_p_val   = q_val,
+    raw_p_val   = p_val
+  ) %>%
+  select(cluster, contrast, framework, direction, adj_p_val, raw_p_val)
+
+combined_results <- bind_rows(sccomp_collected, voomclr_collected, ancombc_collected)
+
+saveRDS(combined_results, "combined_compositional_results_human_astro.rds")
+
+# --- consensus: significant in >= 2 of the 3 frameworks ----------------------
+#set NAs to 1 below (not significant if not reported, relevant to sccomp but won't change anything)
+
+combined_results = readRDS("combined_compositional_results_human_astro.rds")
+sig_at_least_2 <- combined_results %>%
+  select(-contrast) %>% #all contrasts same
+  mutate(raw_p_val = case_when(
+    is.na(raw_p_val) ~ 1,
+    .default =  raw_p_val
+  )) %>% 
+  filter(raw_p_val < .1 | adj_p_val < .1) %>% 
+  mutate(passed = T) %>% 
+  group_by(cluster, direction, passed) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+```
+
+Plot astrocyte-5 proportions alongside all proportions 
+```{r}
+prop_plot_df <- cluster_counts %>%
+  group_by(donor_id) %>%
+  mutate(total = sum(count), proportion = count / total) %>%
+  ungroup() %>%
+  mutate(highlight = ifelse(astrocyte_mapped_cluster == "astrocyte-5", "astrocyte-5", "other"),
+         cluster = factor(astrocyte_mapped_cluster,
+                          levels = str_sort(unique(astrocyte_mapped_cluster), numeric = TRUE)))
+
+# 
+# 
+# 
+# 
+# # --- panel A: all clusters ----------------------------------------------------
+# p_all <- ggplot(prop_plot_df, aes(x = cluster, y = proportion, fill = ad)) +
+#   geom_boxplot(outlier.size = 0.8, position = position_dodge(width = 0.75), alpha = 0.7) +
+#   geom_point(aes(group = ad), position = position_dodge(width = 0.75),
+#              size = 1, alpha = 0.5) +
+#   scale_fill_manual(values = c(ctl = "#a1bad4", ad = "#f6b2ba"), name = "Condition") +
+#   labs(x = "Predicted cluster", y = "Proportion of astrocytes per donor") +
+#   theme_bw(base_size = 11) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+#         panel.grid.minor = element_blank())
+
+library(patchwork)
+#p_all + p_astro5 + plot_layout(widths = c(3, 1))
+
+#plot astro-5 + astro_marker_map_xgb
+
+#sccomp p
+astro5_p <- contrast_result %>%
+  filter(astrocyte_mapped_cluster == "astrocyte-5") %>%
+  pull(c_FDR)
+
+library(ggsignif)
+library(patchwork)
+
+astro5_star <- case_when(
+  astro5_p < 0.001 ~ "***",
+  astro5_p < 0.01  ~ "**",
+  astro5_p < 0.05  ~ "*",
+  astro5_p < 0.1   ~ "†",
+  TRUE             ~ "ns"
+)
+
+# --- panel B: astrocyte-5 zoomed in ------------------------------------------
+p_astro5 <- prop_plot_df %>%
+  filter(astrocyte_mapped_cluster == "astrocyte-5") %>%
+  ggplot(aes(x = ad, y = proportion, fill = ad)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, size = 2) +
+  geom_signif(
+    data = data.frame(
+      xmin = 1, xmax = 2,
+      annotations = astro5_star,
+      y_position  = max(
+        prop_plot_df$proportion[prop_plot_df$astrocyte_mapped_cluster == "astrocyte-5"]
+      ) * 1.08
+    ),
+    aes(xmin = xmin, xmax = xmax,
+        annotations = annotations,
+        y_position  = y_position),
+      manual      = TRUE,
+      textsize    = 5,
+      vjust       = .3,
+      tip_length  = 0.02,
+      inherit.aes = FALSE
+  ) +
+  scale_x_discrete(labels = c(ctl = "Control", ad = "AD")) +
+  scale_fill_manual(values = c(ctl = "#a1bad4", ad = "#f6b2ba"), guide = "none") +
+  labs(x = NULL, y = "Proportion of Cells Mapped to Astrocyte-5") +
+  theme_bw(base_size = 18) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold",color = "black",size = 18),
+        panel.grid.minor = element_blank())
+
+p_astro_validation <- p_astro5 + plot_spacer() + astro_marker_map_xgb + plot_layout(widths = c(.3,.1,.6))
+
+ggsave("astrocyte-validation-panel.pdf", p_astro_validation, width = 18, height = 10)
+```
+
+
+Plot mouse astro cluster above
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% dplyr::count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+# Split the cluster assignments into a list by cell class
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+#convert animal_id to factor, to use to add metadata later 
+animal_metadata$animal_id = as.factor(animal_metadata$animal_id)
+
+
+#change young to 6 and old to 14 in age
+animal_metadata$age = case_when(
+  animal_metadata$age == "young" ~ "6",
+  animal_metadata$age == "old" ~ "14",
+  .default = NA
+)
+
+cluster_counts_per_class = vector(mode = "list", length = length(cluster_list))
+names(cluster_counts_per_class) = names(cluster_list)
+
+for(i in seq_along(cluster_list)) {
+  cur_class = names(cluster_list)[i]
+  #initialize df to count cluster counts
+  cluster_counts = cluster_list[[cur_class]] %>% ungroup()
+  #convert columns to factor
+  cluster_counts$cluster = as.factor(cluster_counts$cluster)
+  cluster_counts$animal_id = as.factor(cluster_counts$animal_id)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  cluster_counts = cluster_counts %>% ungroup() %>% group_by(cluster, animal_id, .drop = F) %>% dplyr::count(name = "count")
+  #add other columns back
+  cluster_counts = cluster_counts %>% left_join(animal_metadata, by = "animal_id")
+  #convert columns to factor
+  cluster_counts$genotype = as.factor(cluster_counts$genotype)
+  cluster_counts$strain = as.factor(cluster_counts$strain)
+  cluster_counts$sex = as.factor(cluster_counts$sex)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  #add "animal_" and "cluster_" to relevant columns to avoid problems with sccomp
+  #cluster_counts$animal_id = paste0("animal_", cluster_counts$animal_id) %>% as.factor()
+  #cluster_counts$cluster = paste0("cluster_", cluster_counts$cluster) %>% as.factor()
+  #relevel to get the following as reference: genotype - Ntg, age - 6, sex - M
+  cluster_counts$genotype = relevel(cluster_counts$genotype, ref = "Ntg")
+  cluster_counts$age = relevel(cluster_counts$age, ref = "6")
+  cluster_counts$sex = relevel(cluster_counts$sex, ref = "Male")
+  cluster_counts$strain = relevel(cluster_counts$strain, ref = "B6")
+  #ungroup the data to avoid problems with sccomp
+  cluster_counts = cluster_counts %>% ungroup()
+  cluster_counts_per_class[[cur_class]] = cluster_counts
+}
+```
+
+Get relative astrocyte cluster proportions per animal
+```{r}
+astro_counts = cluster_counts_per_class$astrocyte
+astrocyte_proportions = astro_counts %>%
+  ungroup %>%
+  group_by(animal_id, .drop = F) %>%
+  mutate(total_cells = sum(count)) %>% # Total cells *within the class*
+  mutate(proportion = count/total_cells)
+```
+
+Plot 5x 14 month vs Ntg 14 month Female
+```{r}
+# Plot 5x 14 month vs Ntg 14 month Female
+astrocyte_proportions <- astrocyte_proportions %>%
+  filter(age == 14 & sex == "Female" & cluster == "astrocyte-5")
+
+color_ntg_5xfad <- c("Ntg" = "#a1bad4", "5XFAD" = "#f6b2ba")
+
+
+
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+
+
+#manual annotation
+#astro 5 plot (cap outliers at .05)
+astro_5_plot <- ggplot(
+  astrocyte_proportions %>% mutate(proportion = case_when(
+    proportion > .05 ~ .05,
+    .default = proportion)),
+  aes(x = genotype, y = proportion, fill = genotype)
+) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(aes(color = strain), width = .1, size = 2) +
+  geom_signif(
+    comparisons  = list(c("Ntg", "5XFAD")),
+    annotations  = "***",
+    y_position   = .055,
+    textsize     = 5,
+    vjust        = .3,
+    tip_length   = 0.02
+  ) +
+  scale_fill_manual(values = color_ntg_5xfad) +
+  scale_color_manual(name = "Strain", values = color_mapping_strains_to_colors) +
+  guides(color = "none",fill = "none") +
+  scale_x_discrete(labels = c("Ntg" = "Ntg", "5XFAD" = "5XFAD")) +
+  ylim(c(0, .07)) +
+  labs(x = NULL, y = "14 Mo Female Mouse Proportion (Capped at .05)") +
+  theme_bw(base_size = 15) +
+   theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 20),
+        axis.text = element_text(face = "bold",color = "black",size = 18),
+        panel.grid.minor = element_blank())
+
+ggsave("astro_5_mouse_validation_plot.pdf", astro_5_plot, width = 7, height = 8)
+
+```
+
+
+

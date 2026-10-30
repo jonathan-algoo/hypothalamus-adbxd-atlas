@@ -1,0 +1,266 @@
+---
+title: "consensus proportion modeling - ancombc2"
+output: html_document
+date: "2025-07-22"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+```
+
+Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments. Perform testing and evaluation on each cell class separately. 
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+# Split the cluster assignments into a list by cell class
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+#convert animal_id to factor, to use to add metadata later 
+animal_metadata$animal_id = as.factor(animal_metadata$animal_id)
+
+```
+
+
+Get list of cluster counts per cell class
+```{r}
+cluster_counts_per_class = vector(mode = "list", length = length(cluster_list))
+names(cluster_counts_per_class) = names(cluster_list)
+
+for(i in seq_along(cluster_list)) {
+  cur_class = names(cluster_list)[i]
+  #initialize df to count cluster counts
+  cluster_counts = cluster_list[[cur_class]] %>% ungroup()
+  #convert columns to factor
+  cluster_counts$cluster = as.factor(cluster_counts$cluster)
+  cluster_counts$animal_id = as.factor(cluster_counts$animal_id)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  cluster_counts = cluster_counts %>% ungroup() %>% group_by(cluster, animal_id, .drop = F) %>% dplyr::count(name = "count")
+  #add other columns back
+  cluster_counts = cluster_counts %>% left_join(animal_metadata, by = "animal_id")
+  #convert columns to factor
+  cluster_counts$genotype = as.factor(cluster_counts$genotype)
+  cluster_counts$strain = as.factor(cluster_counts$strain)
+  cluster_counts$sex = as.factor(cluster_counts$sex)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  #add "animal_" and "cluster_" to relevant columns to avoid problems with sccomp
+  cluster_counts$animal_id = paste0("animal_", cluster_counts$animal_id) %>% as.factor()
+  cluster_counts$cluster = paste0("cluster_", cluster_counts$cluster) %>% as.factor()
+  #relevel to get the following as reference: genotype - Ntg, age - 6, sex - M
+  cluster_counts$genotype = relevel(cluster_counts$genotype, ref = "Ntg")
+  cluster_counts$age = relevel(cluster_counts$age, ref = "young")
+  cluster_counts$sex = relevel(cluster_counts$sex, ref = "Male")
+  cluster_counts = cluster_counts %>%
+    mutate(age_genotype = interaction(age, genotype,sep = "_"))
+  cluster_counts$strain = relevel(cluster_counts$strain, ref = "B6")
+  #ungroup the data to avoid problems with sccomp
+  cluster_counts = cluster_counts %>% ungroup()
+  cluster_counts_per_class[[cur_class]] = cluster_counts
+}
+
+```
+
+
+Per cell class, evaluate cluster abundance differences.
+Amended to use intercept (as opposed to 0 intercept models used in other proportion methods/DEG method dreamlet) because ancombc doesn't allow 0 intercept models. 
+```{r}
+# Add "animal_" prefix to animal_id for filtering
+animal_metadata$animal_id = paste0("animal_", animal_metadata$animal_id) %>% as.factor()
+
+#reparametrize so age*genotype combinations are in separate groups
+animal_metadata = animal_metadata %>%
+  mutate(age_genotype = interaction(age, genotype,sep = "_"))
+#levels: young_Ntg old_5XFAD young_5XFAD old_Ntg
+
+#create variable denoting sex
+```
+
+
+```{r}
+library(ANCOMBC)
+library(TreeSummarizedExperiment)
+
+#make per age/genotype/sex groups, which will directly be compared with each other.
+#ex: 5x/14 mo/males vs 5x/6 mo/males
+cluster_counts_per_class = lapply(cluster_counts_per_class, function(df) {
+  df %>% 
+    mutate(group_union = paste0(age_genotype, "_", sex)) %>%
+    mutate(group_union = as.factor(group_union))
+})
+
+#laying out what I want to test here: Target Group (1st) - Reference Group (2nd)
+contrast_map = list(
+  "prolonged_amyloid_male"       = c("old_5XFAD_Male",   "old_Ntg_Male"),
+  "early_amyloid_male"           = c("young_5XFAD_Male", "young_Ntg_Male"),
+  "aging_male"                   = c("old_Ntg_Male",     "young_Ntg_Male"),
+  "prolonged_amyloid_female"     = c("old_5XFAD_Female", "old_Ntg_Female"),
+  "early_amyloid_female"         = c("young_5XFAD_Female","young_Ntg_Female"),
+  "aging_female"                 = c("old_Ntg_Female",   "young_Ntg_Female"),
+  "late_vs_early_amyloid_male"   = c("old_5XFAD_Male",   "young_5XFAD_Male"),
+  "late_vs_early_amyloid_female" = c("old_5XFAD_Female", "young_5XFAD_Female"),
+  "effect_of_sex_young_ntg"      = c("young_Ntg_Female", "young_Ntg_Male"),
+  "effect_of_sex_young_5x"       = c("young_5XFAD_Female","young_5XFAD_Male"),
+  "effect_of_sex_old_ntg"        = c("old_Ntg_Female",   "old_Ntg_Male"),
+  "effect_of_sex_old_5x"         = c("old_5XFAD_Female", "old_5XFAD_Male")
+)
+```
+
+
+
+
+
+
+```{r}
+
+
+#run through each class and perform contrasts
+final_ancombc_results = list()
+for (class_name in names(cluster_counts_per_class)) {
+  message(paste0("Processing Class: ", class_name))
+  df_curr = cluster_counts_per_class[[class_name]]
+  #create TSE/treesummarizedexperiment class
+  #pivot counts to wide format: Rows = Clusters, Cols = Animals
+  count_mat = df_curr %>% 
+    dplyr::select(cluster, animal_id, count) %>%
+    tidyr::pivot_wider(names_from = animal_id, values_from = count, values_fill = 0) %>%
+    tibble::column_to_rownames("cluster") %>%
+    as.matrix()
+  
+  meta_df = df_curr %>% 
+    distinct(animal_id, .keep_all = TRUE) %>%
+    tibble::column_to_rownames("animal_id")
+  
+  meta_df = meta_df[colnames(count_mat), ]
+  tse = TreeSummarizedExperiment::TreeSummarizedExperiment(
+    assays = list(counts = count_mat),
+    colData = meta_df
+  )
+  
+  class_contrast_results = list()
+  
+  # Inner Loop: Iterate through specific contrasts
+  for (contrast_name in names(contrast_map)) {
+    
+    target_grp = contrast_map[[contrast_name]][1]
+    ref_grp    = contrast_map[[contrast_name]][2]
+    
+    avail_groups = unique(colData(tse)$group_union)
+    if(!all(c(target_grp, ref_grp) %in% avail_groups)) {
+      message(paste("Skipping contrast", contrast_name, "- groups missing in data."))
+      next
+    }
+    
+    # Re-level: Set the "Reference" group as the intercept
+    colData(tse)$group_union = factor(colData(tse)$group_union)
+    colData(tse)$group_union = relevel(colData(tse)$group_union, ref = ref_grp)
+    
+    # p_adj_method = "none" 
+    out = ancombc2(
+      data = tse,
+      assay_name = "counts",
+      fix_formula = "group_union",
+      rand_formula = "(1|strain)",
+      p_adj_method = "none", 
+      n_cl = 8,
+      verbose = FALSE
+    )
+    term_name = paste0("group_union", target_grp)
+    
+    res_table = out$res %>%
+      dplyr::select(taxon, starts_with(paste0("lfc_", term_name)), 
+                    starts_with(paste0("se_", term_name)), 
+                    starts_with(paste0("p_", term_name))) 
+    
+    colnames(res_table) = c("cluster", "lfc", "se", "p_val")
+    
+    res_table = res_table %>%
+      mutate(contrast = contrast_name, 
+             cell_class = class_name)
+    
+    class_contrast_results[[contrast_name]] = res_table
+  }
+  
+  final_ancombc_results[[class_name]] = bind_rows(class_contrast_results)
+}
+
+# Combine all results into a single dataframe
+ancombc_results_df = bind_rows(final_ancombc_results)
+
+#p val correction for each class and contrast
+ancombc_results_df = ancombc_results_df %>%
+  group_by(cell_class, contrast) %>%
+  mutate(p_val_adj = p.adjust(p_val, method = "BH")) %>%
+  ungroup()
+
+saveRDS(ancombc_results_df, "ancombc2_prop_results.rds")
+```
+

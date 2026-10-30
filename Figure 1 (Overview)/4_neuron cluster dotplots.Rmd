@@ -1,0 +1,167 @@
+---
+title: "1c_neuron_np_name_dotplot.Rmd"
+output: html_document
+date: "2025-06-01"
+---
+
+Dotplot giving size as percent and color (ranging from blue to white to red) as the log1p expression avg
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+
+#plot neuronal/non-neuronal discriminatory gene dotplot separately, then together
+neuron_assignments = readRDS(file = "../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+neuron_names = names(neuron_assignments)
+neuron_assignments = df_internal_and_official_name$official_name[match(neuron_assignments, df_internal_and_official_name$numeric_id)]
+names(neuron_assignments) = neuron_names
+neuronal_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+neuronal_ge = neuronal_ge[,names(neuron_assignments)]
+log_norm_neuronal_ge =   multiply_cols(neuronal_ge, 1/Matrix::colSums(neuronal_ge))
+log_norm_neuronal_ge <- log1p(log_norm_neuronal_ge * 1e6) # Log cpm
+all_neuronal_log_norm = pseudobulk_matrix(log_norm_neuronal_ge, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+all_neuronal_percent = pseudobulk_matrix(neuronal_ge > 0, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+```
+
+
+```{r}
+#get gene set/np + receptor marker genes for each cluster embedded in the cluster name
+naming_df = data.frame(cluster_name = unique(neuron_assignments), marker_genes = NA)
+
+naming_df <- naming_df %>% 
+  mutate(
+    marker_genes = str_split(cluster_name, "_") %>% map(~.x[-1])
+  ) 
+markers_to_keep_in_plot = naming_df$marker_genes %>% unlist()
+markers_to_keep_in_plot =markers_to_keep_in_plot %>% .[!. %in% c("Galanin Neurons", "Histaminergic", "Hypocretin", "Orexin", "Mch", "KNDy", "Dopaminergic", "Magnocellular","TIDA","Gnrh","Prlh")]
+#add markers corresponding to genes back, reorder a bit for plot, then get unique values
+markers_to_keep_in_plot = c("Slc17a6","Slc32a1", "Ghrh", "Gal", "Hdc", "Hcrt", "Pmch", "Kiss1", "Pdyn", "Tac2", "Slc6a3", "Avp","Oxt", "Gnrh1", "Glp1r","Lepr","Agrp","Npy","Pomc","Cartpt","Prlh","Trh", "Adcyap1", markers_to_keep_in_plot) %>% unique
+```
+
+```{r}
+selected_neuronal_ge_ln = all_neuronal_log_norm[markers_to_keep_in_plot,]
+
+selected_neuronal_percent = all_neuronal_percent[markers_to_keep_in_plot,]
+#tidy data w/cluster as row, ln + percent as columns
+selected_neuronal_percent = selected_neuronal_percent %>% as.data.frame() %>% rownames_to_column("gene") %>%  pivot_longer(-gene, names_to = "cluster", values_to = "percent_exp")
+selected_neuronal_ge_ln = selected_neuronal_ge_ln %>% as.data.frame() %>% rownames_to_column("gene") %>%  pivot_longer(-gene, names_to = "cluster", values_to = "ln_ge")
+selected_neuronal_both = selected_neuronal_percent %>% left_join(selected_neuronal_ge_ln)
+
+#scale and center/zscore ln ge to between -1 and 1 for each gene
+selected_neuronal_both = selected_neuronal_both %>%
+        group_by(gene) %>%
+        mutate(z_score_ln_ge = scale(ln_ge))
+
+#set max to .5 for visualization purposes (to make it easier to distinguish pairs w/ > .25 and < .05, which were optimized for (at least 2 per pair))
+selected_neuronal_both$percent_exp[selected_neuronal_both$percent_exp > .5] = .5
+```
+
+
+Cell metadata
+```{r}
+cell_metadata = data.frame(cell_id = names(neuron_assignments), cluster = neuron_assignments)
+slc17_neuron_clusts = cell_metadata %>% pull(cluster) %>%  .[grepl("Slc17a6", .)] %>% unique
+slc32_neuron_clusts = cell_metadata  %>% pull(cluster) %>% .[grepl("Slc32a1", .)] %>% unique
+#manually add one with both
+slc17_neuron_clusts = slc17_neuron_clusts %>% .[!grepl("Slc32a1", .)]
+slc32_neuron_clusts = slc32_neuron_clusts %>% .[!grepl("Slc17a6", .)]
+
+#remove these two manually (add later)
+slc17_neuron_clusts = slc17_neuron_clusts[slc17_neuron_clusts != "63_Slc17a6_Crh"]
+slc32_neuron_clusts = slc32_neuron_clusts[slc32_neuron_clusts != "30_Slc32a1_Crh"]
+
+#get 17 and 32a1 genes and put in order of the clusters they appear after the canonical ones/one with both (nps/clusts after Slc17a6)
+genes_17 <- unlist(lapply(slc17_neuron_clusts, function(s) {
+  parts <- strsplit(s, "_", fixed = TRUE)[[1]]
+  i     <- match("Slc17a6", parts)
+  if (!is.na(i) && i < length(parts)) parts[(i + 1):length(parts)] else character(0)
+})) %>% unique
+
+genes_32 <- unlist(lapply(slc32_neuron_clusts, function(s) {
+  parts <- strsplit(s, "_", fixed = TRUE)[[1]]
+  i     <- match("Slc32a1", parts)
+  if (!is.na(i) && i < length(parts)) parts[(i + 1):length(parts)] else character(0)
+})) %>% unique
+
+
+
+#manually order clusts to match (from canonical to slc17 to slc32)
+new_order_clusts = c("2_Ghrh_Gal","15_Histaminergic","19_Orexin_Hypocretin","40_Mch","55_KNDy","13_TIDA_Dopaminergic","100_Avp_Magnocellular", "101_Oxt_Magnocellular","4_Gnrh_Kiss1r","44_Glp1r_Lepr","41_Agrp_Npy","54_Pomc_Cartpt","8_Prlh","30_Slc32a1_Crh","63_Slc17a6_Crh","51_Slc17a6_Ptger3_Gpr83", "36_Slc17a6_Nts","39_Slc32a1_Gpr50", "60_Slc17a6_Slc32a1_Adgrf2_Gpr161",slc17_neuron_clusts,slc32_neuron_clusts) %>% unique
+```
+
+
+```{r}
+#manually order some genes
+gene_order <- c("Slc17a6", "Slc32a1","Ghrh", "Gal", "Hdc", "Hcrt", "Pmch", "Kiss1", "Pdyn", "Tac2","Slc6a3", "Avp", "Oxt", "Gnrh1", "Glp1r", "Lepr", "Agrp", "Npy", "Pomc","Cartpt","Prlh","Crh", "Trh","Adgrf2","Gpr161","Adcyap1","Ptger3","Gpr83", "Nts","Gpr50")
+gene_order =c(gene_order, genes_17, genes_32) %>% unique
+selected_neuronal_both$gene = selected_neuronal_both$gene %>% factor() %>% fct_relevel(gene_order)
+              
+selected_neuronal_both$cluster = factor(selected_neuronal_both$cluster, levels = new_order_clusts)
+```
+
+
+```{r}
+neuronal_discriminatory_dotplot =  ggplot(selected_neuronal_both, aes(x = cluster, y = gene, fill = z_score_ln_ge, size = percent_exp)) + 
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(name = "Fraction\nExpressed") +
+  labs(x = "Cluster", y = "Marker Gene") +
+  scale_fill_gradient2(name = "Scaled Log-\nNormalized GE",mid = "white",high = "#D55E00",low = "#0072B2") +
+  ggtitle("Neuronal Cluster Markers") +
+  theme_classic(base_size = 20, base_family = "Helvetica") +  
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  theme(
+    plot.title = element_text(face = "bold", size = 100,hjust = .5),
+    axis.title.x = element_text(face = "bold", size = 50),
+    axis.title.y = element_text(face = "bold", size = 50),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "bold"),
+    legend.position = "right",
+    legend.key.size = unit(5, "cm")
+  )
+flname = "./supp_neuron_dotplot_all_clusters.pdf"
+ggsave(flname, neuronal_discriminatory_dotplot, device = "pdf", width = 40, height = 30)
+```
+
+
+Create subtype plot
+```{r}
+canonical_clusters = c("2_Ghrh_Gal","15_Histaminergic","19_Orexin_Hypocretin","40_Mch","55_KNDy","13_TIDA_Dopaminergic","100_Avp_Magnocellular", "101_Oxt_Magnocellular","4_Gnrh_Kiss1r","44_Glp1r_Lepr","41_Agrp_Npy","54_Pomc_Cartpt","8_Prlh","30_Slc32a1_Crh","63_Slc17a6_Crh","36_Slc17a6_Nts","51_Slc17a6_Ptger3_Gpr83","39_Slc32a1_Gpr50")
+selected_data_canonical = selected_neuronal_both %>% filter(cluster %in% canonical_clusters)
+
+selected_data_canonical = selected_data_canonical %>% filter(gene %in% c("Slc17a6","Slc32a1", "Ghrh", "Gal", "Hdc", "Hcrt", "Pmch", "Kiss1", "Pdyn", "Tac2", "Slc6a3", "Avp","Oxt", "Gnrh1", "Glp1r","Lepr","Agrp","Npy","Pomc","Cartpt","Prlh","Crh","Ptger3","Gpr83", "Nts","Gpr50"))
+selected_data_canonical = selected_data_canonical %>% droplevels()
+
+
+neuronal_just_canonical_dotplot = ggplot(selected_data_canonical, aes(x = cluster, y = gene, fill = z_score_ln_ge, size = percent_exp)) +  
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(name = "Fraction\nExpressed",max_size = 20) +
+  scale_fill_gradient2(
+    name = "Scaled Log-\nNormalized GE",
+    mid = "white",
+    high = "#D55E00", 
+    low = "#0072B2"
+  ) +
+  labs(x = "Cluster", y = "Marker Gene") +
+  ggtitle("Selected Neuronal Cell Type Marker Genes") +
+  theme_classic(base_size = 40, base_family = "Helvetica") +  
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  theme(
+    plot.title = element_text(face = "bold", size = 90,hjust = .5),
+    axis.title.x = element_text(face = "bold", size = 80),
+    axis.title.y = element_text(face = "bold", size = 80),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "bold",size = 40),
+    legend.position = "right",
+    legend.key.size = unit(4, "cm")
+  )
+
+
+ggsave("neuronal_canonical_dotplot.pdf", neuronal_just_canonical_dotplot, device = "pdf", width = 35, height = 27,limitsize = F)
+
+```

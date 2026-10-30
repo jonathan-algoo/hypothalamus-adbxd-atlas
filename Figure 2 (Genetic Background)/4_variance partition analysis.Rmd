@@ -1,0 +1,190 @@
+---
+title: "variance partition analysis - glia"
+output: html_document
+date: "2025-07-11"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(limma)
+library(dplyr)
+library(doParallel)
+library(variancePartition)
+library("limma")
+library("edgeR")
+
+set.seed(1)
+
+
+#Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments. Perform testing and evaluation on each cell class separately.
+
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+animal_metadata$age = factor(animal_metadata$age, levels = c("young","old"))
+
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+
+#Combine and add metadata
+
+#append neuronal to non neuronal
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+cell_metadata = cell_metadata %>% mutate(cluster = case_when(
+  cluster %in% df_internal_and_official_name$numeric_id ~ df_internal_and_official_name$official_name[match(cluster, df_internal_and_official_name$numeric_id)],
+  .default = cluster
+))
+cell_metadata$cluster = as.factor(cell_metadata$cluster)
+
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+# add cell class
+cell_metadata =cell_metadata %>% mutate(cell_class = case_when(
+  cluster %in% df_internal_and_official_name$official_name ~ "neuronal",#neuronal
+  .default = sub("[-_].*", "", cluster) #non-neuronal
+)) 
+cell_metadata$cell_class = as.factor(cell_metadata$cell_class)
+#Identify classes with only one cluster and remove from proportion analysis, since we do it by class - removed tcells, bam
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+#add "animal_" to animal_id column to avoid problems with sccomp, and convert to factor; and do same for animal_metadata
+cell_metadata$animal_id = paste0("animal_",cell_metadata$animal_id) %>% as.factor() 
+animal_metadata$animal_id = paste0("animal_",animal_metadata$animal_id) %>% as.factor()
+
+#split neuronal into gabaergic or glutamatergic cell classes based on 25% expression, remove sole cluster that's both 
+aggregate_percent_exp = readRDS("../shared objs and code/aggregate_percent_neuronal.rds")
+aggregate_percent_exp = aggregate_percent_exp %>% as.data.frame()
+aggregate_percent_exp_gaba_glut = aggregate_percent_exp[c("Slc32a1","Slc17a6"),]
+
+aggregate_percent_exp_gaba_glut = aggregate_percent_exp_gaba_glut %>% rownames_to_column("gene") %>% pivot_longer(-gene, names_to = "cluster", values_to = "percent_exp") %>% pivot_wider(names_from = gene, values_from = percent_exp)
+aggregate_percent_exp_gaba_glut = aggregate_percent_exp_gaba_glut %>% mutate(neuronal_type = case_when(
+  Slc32a1 > .25 & Slc17a6 < .25 ~ "Gabaergic",
+  Slc32a1 < .25 & Slc17a6 > .25 ~ "Glutamatergic",
+  Slc32a1 > .25 & Slc17a6 >= .25 ~ "Neuronal - Both",
+  .default = NA
+))
+
+cell_metadata$neuronal_type = aggregate_percent_exp_gaba_glut$neuronal_type[match(cell_metadata$cluster, aggregate_percent_exp_gaba_glut$cluster)]
+cell_metadata = cell_metadata %>% filter(neuronal_type != "Neuronal - Both" | is.na(neuronal_type))
+# Split the cluster assignments into a list by cell class to loop over
+cell_metadata = cell_metadata %>% mutate(cell_class = case_when(
+  neuronal_type == "Glutamatergic" ~ "Glutamatergic",
+  neuronal_type == "Gabaergic" ~ "Gabaergic",
+.default = cell_class #non-neuronal classes
+ ))
+
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+genes_to_remove <- rownames(all_ge)[grepl("^Gm|Rik", rownames(all_ge))]
+all_ge = all_ge[!rownames(all_ge) %in% genes_to_remove, ]
+
+library(variancePartition)
+variance_partition_formula = ~ (1|strain) + (1|sex) + (1|genotype) + (1|age)
+
+class_list <- c("VLMC","astrocyte","ependymal","microglia","olig","opc","tanycyte","vascular", "Gabaergic", "Glutamatergic")
+
+all_results <- list()
+cl <- makeCluster(8)
+registerDoParallel(cl)
+
+
+#helper function - select top 5000 variable genes as subset
+get_var_genes_from_counts = function(initial_ge_matrix, n_var_genes = 5000) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  rownames(variable_genes)
+}
+```
+
+
+```{r}
+for (cur_class in class_list) {
+    # Filter metadata for current cell class
+    cur_meta <- cell_metadata %>%
+      filter(cell_class == cur_class) %>%
+      droplevels()
+    
+    # Subset gene expression matrix to these cells
+    cur_ge_subset <- all_ge[, cur_meta$cell_id]
+    
+    #get var genes and subset
+    var_genes = get_var_genes_from_counts(cur_ge_subset)
+    cur_ge_subset = cur_ge_subset[var_genes,]
+    
+    # Pseudobulk expression per animal/cell class (could also use mean)
+    cur_pb <- pseudobulk_matrix(cur_ge_subset, cell_groups = cur_meta$animal_id, method = "sum")
+    
+    # Create pseudobulk metadata df with matching columns
+    pb_meta <- cur_meta %>%
+      select(animal_id, strain, sex, genotype, age, cell_class) %>% 
+      distinct() %>%
+      as.data.frame()
+    rownames(pb_meta) <- pb_meta$animal_id
+    pb_meta <- pb_meta[colnames(cur_pb), ]
+
+  #normalize via log1p cpm normalization
+  cur_pb =  multiply_cols(cur_pb, 1/Matrix::colSums(cur_pb))
+  cur_pb <- log1p(cur_pb * 1e6)
+  # Run variancePartition analysis
+  varPart <- fitExtractVarPartModel(cur_pb, variance_partition_formula, pb_meta)
+  varPart$class = cur_class
+  all_results[[cur_class]][["variance_df"]] = varPart %>%  as.data.frame() %>% rownames_to_column("gene") 
+  all_results[[cur_class]][["norm_exp_data"]] = cur_pb
+  all_results[[cur_class]][["pb_meta"]] = pb_meta %>% mutate(class = cur_class)
+}
+saveRDS(all_results,"all_results_var_partition_analysis.rds")
+```

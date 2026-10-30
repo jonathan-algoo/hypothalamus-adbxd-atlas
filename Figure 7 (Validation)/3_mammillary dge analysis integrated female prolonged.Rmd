@@ -1,0 +1,490 @@
+---
+title: "mammillary dge analysis integrated"
+output: html_document
+date: "2026-08-12"
+---
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+library(harmony)
+library(dreamlet)
+library(SingleCellExperiment)
+hypoad_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+cell_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+
+rna_and_pmi_info = read_csv("./hypoad_prepro/rna and pmi donor info.csv")
+rna_and_pmi_info = rna_and_pmi_info[1:14,]
+rna_and_pmi_info$pmi_hours_format= rna_and_pmi_info$pmi_hours_format %>% as.character()
+#from stack overflow
+rna_and_pmi_info$pmi_hours_decimal = 
+sapply(strsplit(rna_and_pmi_info$pmi_hours_format,":"),
+  function(x) {
+    x <- as.numeric(x)
+    x[1]+x[2]/60
+    }
+)
+#copy donor metadata from table 2 
+cell_meta$pmi_hours = rna_and_pmi_info$pmi_hours_decimal[match(cell_meta$donor_id,rna_and_pmi_info$cell_meta_id)] 
+cell_meta$rna_integrity_score = rna_and_pmi_info$rna_integrity_score[match(cell_meta$donor_id,rna_and_pmi_info$cell_meta_id)]
+hypoad_cell_meta_mb = cell_meta %>% filter(is_primary_data) %>% filter(dissection == "MM")
+hypoad_ge_mb = hypoad_ge[,rownames(hypoad_cell_meta_mb)]
+library(tidyverse)
+library(BPCells)
+
+mb_counts_df = readRDS("./rosmap_mb_prepro/doublet and initial cell types pre qc.rds")
+singlet_cells = mb_counts_df %>% filter(scDblFinder_class == "singlet")
+mb_counts = open_matrix_dir("./rosmap_mb_prepro/decontx_counts/")
+mb_counts = mb_counts[,singlet_cells$cell_id]
+
+reads_per_cell <- Matrix::colSums(mb_counts)
+genes_expressed_per_cell = Matrix::colSums(mb_counts > 0)
+qc_df <- data.frame(umis = reads_per_cell, genes_detected = genes_expressed_per_cell)
+
+# Identify mitochondrial genes (human convention)
+mt_genes <- grep("^MT-", rownames(mb_counts), value = TRUE)
+
+# Percent of each cell's UMIs coming from mito genes
+qc_df$pct_mito <- 100 * Matrix::colSums(mb_counts[mt_genes, , drop = FALSE]) / qc_df$umis
+library(ggplot2)
+qc_pass <- qc_df$umis >= 2000 &
+           qc_df$umis <= 1e5 & #catch any remaining multiplets (sequenced high, but prob not necessary)
+           qc_df$genes_detected >= 500 &
+           qc_df$pct_mito <= 5
+
+cat("Cells before QC:", nrow(qc_df), "\n")
+cat("Cells passing QC:", sum(qc_pass),
+    sprintf("(%.1f%%)\n", 100 * mean(qc_pass)))
+
+
+
+mb_counts <- mb_counts[, qc_pass]
+meta_mb_tsai = singlet_cells[match(colnames(mb_counts),singlet_cells$cell_id),]
+
+shared_genes = intersect(rownames(mb_counts),rownames(hypoad_ge_mb))
+mb_counts = mb_counts[shared_genes,]
+hypoad_ge_mb = hypoad_ge_mb[shared_genes,]
+
+meta_mb_tsai = meta_mb_tsai %>% select(cell_id, sample)
+meta_mb_tsai$dataset = "tsai"
+
+synapse_mapping = read_tsv("./rosmap_mb_prepro/SYNAPSE_METADATA_MANIFEST.tsv")
+synapse_mapping = synapse_mapping %>% select(individualID, name)
+synapse_mapping$sample_id = str_extract(synapse_mapping$name, "S\\d+") 
+synapse_mapping = synapse_mapping %>% filter(!is.na(sample_id))
+synapse_mapping = synapse_mapping %>% select(-name) %>% distinct(sample_id,.keep_all = T)
+clinical_meta = read_csv("./rosmap_mb_prepro/ROSMAP_clinical.csv")
+clinical_meta = clinical_meta[match(synapse_mapping$individualID,clinical_meta$individualID),]
+clinical_meta$sample_id = synapse_mapping$sample_id 
+clinical_meta = clinical_meta%>% relocate(sample_id)
+synapse_mapping$projid = clinical_meta$individualID[match(synapse_mapping$individualID,clinical_meta$individualID)]
+
+
+#Standardize meta for mb
+donor_metadata = clinical_meta %>%
+  transmute(
+    sample_id,
+    projid,
+    individualID,
+    sex = factor(if_else(msex == 1, "Male", "Female")),
+    age_death = if_else(age_death == "90+", "90",age_death),
+    braaksc, ceradsc, cogdx, cts_mmse30_lv,dcfdx_lv,
+    pmi
+  ) 
+donor_metadata$age = donor_metadata$age_death %>% as.numeric()
+donor_metadata$donor_id = donor_metadata$sample_id 
+donor_metadata$pmi_hours = donor_metadata$pmi 
+donor_metadata$Braak = donor_metadata$braaksc 
+rosmap_meta = donor_metadata %>% select(donor_id, projid, pmi_hours, sex, ceradsc, age)
+rosmap_meta$ad = if_else(rosmap_meta$ceradsc <=2, "ad","ctl")
+
+library(readxl)
+rosmap_full_meta_for_age = read_xlsx("./rosmap_mb_prepro/dataset_707_cross-sectional_03-17-2026.xlsx")
+
+rosmap_meta$dataset = "rosmap"
+rosmap_meta$age = rosmap_full_meta_for_age$age_death[match(rosmap_meta$projid, rosmap_full_meta_for_age$projid)]
+
+
+hypoad_cell_meta_mb[["sex"]] = "Female"
+
+hypoad_donor_meta = hypoad_cell_meta_mb %>% select(donor_id, pmi_hours, sex, condition, age) %>% distinct()
+hypoad_donor_meta = hypoad_donor_meta %>% mutate(
+  ad = case_when(condition %in% c("AD_44","AD") ~ "ad",
+                 .default = "ctl")
+)
+hypoad_donor_meta$dataset = "hypoad"
+hypoad_donor_meta$pmi_hours = hypoad_donor_meta$pmi_hours %>% scale
+hypoad_donor_meta$ad = factor(hypoad_donor_meta$ad, levels = c("ctl","ad"))
+
+rosmap_meta$pmi_hours = rosmap_meta$pmi_hours %>% scale()
+rosmap_meta$ad = factor(rosmap_meta$ad, levels = c("ctl","ad"))
+
+
+hypoad_donor_meta$age = hypoad_donor_meta$age %>% scale
+rosmap_meta$age = rosmap_meta$age %>% scale()
+# 
+
+full_meta = bind_rows(hypoad_donor_meta,rosmap_meta)
+```
+
+Load cellular data
+```{r}
+
+cell_df <- readRDS("final_cluster_assignments_integrated_dset.rds")
+cell_df = cell_df %>% select(-dataset)
+cell_df <- cell_df %>%
+  filter(keep == TRUE) %>%
+  dplyr::rename("donor_id" = "sample") %>%
+  left_join(full_meta, by = "donor_id") %>%
+  filter(sex == "Female")
+
+# check these names match unique(cell_df$dataset)
+mat_paths <- c(
+  rosmap = "./rosmap_mb_prepro/decontx_counts/",
+  hypoad = "./hypoad_prepro/hypoad_counts_bpcells_mat/"
+)
+
+model_formula <- as.formula("~ad + age + pmi_hours")
+
+per_dset <- lapply(names(mat_paths), function(dset) {
+
+  meta_d <- cell_df %>% filter(dataset == dset)
+
+  ge_mat <- open_matrix_dir(mat_paths[[dset]])
+  ge_mat <- ge_mat[, meta_d$cell_id]
+  ge_mat <- ge_mat %>% as("dgCMatrix")
+
+  sce_obj <- SingleCellExperiment(
+    assays  = list(counts = ge_mat),
+    colData = meta_d
+  )
+
+  pb <- aggregateToPseudoBulk(
+    sce_obj,
+    assay      = "counts",
+    cluster_id = "final_cluster_assignment",
+    sample_id  = "donor_id"
+  )
+
+  processed_assay      <- processAssays(pb, model_formula)
+  processed_de_results <- dreamlet(processed_assay, model_formula)
+
+  ad_results <- topTable(processed_de_results, coef = "adad" , number = Inf) %>%
+    as.data.frame() %>%
+    mutate(dataset = dset)
+
+  list(pb = pb, fit = processed_de_results, results = ad_results)
+})
+names(per_dset) <- names(mat_paths)
+
+# combined table, still labelled by dataset
+ad_results_all <- bind_rows(lapply(per_dset, `[[`, "results"))
+```
+
+Filter just to mouse female DEGs
+```{r}
+# filter for comparisons of interest
+comparisons_of_interest <- c("prolonged_amyloid_contrast_f")
+dreamlet_results <- qs2::qs_read("../shared objs and code/dreamlet_de_results_all_contrasts.qs2")
+dreamlet_results <- dreamlet_results %>%
+  filter(cluster %in% c("51_Slc17a6_Ptger3_Gpr83", "36_Slc17a6_Nts") &
+           comparison %in% comparisons_of_interest &
+           adj.P.Val < .05)
+
+
+
+
+
+library(gprofiler2)
+ortholog_df <- gorth(query = dreamlet_results$gene,
+                     source_organism = "mmusculus",
+                     target_organism = "hsapiens")
+dreamlet_results$human_gene <- ortholog_df$ortholog_name[match(dreamlet_results$gene, ortholog_df$input)]
+human_genes_profile = dreamlet_results$human_gene[dreamlet_results$human_gene %in% rownames(mb_counts) & dreamlet_results$human_gene %in% rownames(hypoad_ge)] %>% unique
+```
+
+
+```{r}
+# expected direction per human gene, from the mouse effect
+# human coef is "adad" (AD vs ctl reference), same polarity as the mouse
+# amyloid-vs-control contrast, so mouse-up == human-up
+mouse_dir <- dreamlet_results %>%
+  filter(!is.na(human_gene), !is.na(logFC), logFC != 0) %>%
+  mutate(dir = sign(logFC)) %>%
+  group_by(human_gene) %>%
+  summarise(
+    n_mouse_genes = n(),
+    expected_dir  = if (n_distinct(dir) == 1) dir[1] else NA_real_,
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(expected_dir))
+
+
+target_assays <- c(
+  "medial mammillary neuron",          # primary
+  "lateral mammillary neuron",
+  "MEIS2_KCNC2low_neuron",
+  "glutamatergic_EBF2_EPS8_neuron"
+)
+
+ad_results_neuronal <- ad_results_all %>%
+  filter(assay %in% target_assays) %>%
+  filter(ID %in% human_genes_profile) %>%
+  left_join(mouse_dir, by = c("ID" = "human_gene")) %>%
+  mutate(
+    obs_dir    = sign(t),
+    concordant = obs_dir == expected_dir,
+    P.Value.oneway = case_when(
+      concordant   ~ P.Value / 2,
+      .default = 1 - P.Value / 2
+    )
+  ) %>%
+  # primary: correct within each cell type x dataset
+  group_by(assay, dataset) %>%
+  mutate(adj.P.Val.oneway = p.adjust(P.Value.oneway, method = "fdr"))
+
+ad_results_neuronal_hypoad_female = ad_results_neuronal %>% filter(dataset == "hypoad")
+ad_results_neuronal_rosmap_female = ad_results_neuronal %>% filter(dataset == "rosmap")
+saveRDS(ad_results_neuronal_hypoad_female,"human_neuron_hypoad_dreamlet_results.rds")
+saveRDS(ad_results_neuronal_rosmap_female,"human_neuron_rosmap_dreamlet_results.rds")
+
+
+write_csv(ad_results_neuronal_hypoad_female,"human_neuron_hypoad_dreamlet_results.csv")
+write_csv(ad_results_neuronal_rosmap_female,"human_neuron_rosmap_dreamlet_results.csv")
+
+```
+
+
+
+
+```{r}
+ad_results_hypoad <- ad_results_neuronal %>% filter(dataset == "hypoad") %>% filter(assay == "medial mammillary neuron")
+genes_to_plot = ad_results_hypoad %>% filter(adj.P.Val.oneway < .05) %>% pull(ID)
+#get counts
+meta_d = cell_df %>% filter(dataset == "hypoad")
+
+dset = "hypoad"
+ge_mat <- open_matrix_dir(mat_paths[[dset]])
+ge_mat <- ge_mat[, meta_d$cell_id]
+ge_mat <- ge_mat %>% as("dgCMatrix")
+
+sce_obj <- SingleCellExperiment(
+  assays  = list(counts = ge_mat),
+  colData = meta_d
+)
+
+pb <- aggregateToPseudoBulk(
+  sce_obj,
+  assay      = "counts",
+  cluster_id = "final_cluster_assignment",
+  sample_id  = "donor_id"
+)
+
+processed_assay      <- processAssays(pb, model_formula)
+medial_mb_elist <- assay(processed_assay, "medial mammillary neuron")
+norm_expr   <- medial_mb_elist$E   # genes x donors
+
+
+plot_df <- norm_expr[genes_to_plot, , drop = FALSE] %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "donor_id", values_to = "log2_cpm") %>%
+  left_join(hypoad_donor_meta, by = "donor_id") %>%
+  mutate(gene = factor(gene, levels = c("TGFB2", "RHBDL3", "BMPER", "MYO16")))
+
+# facet labels carrying the human effect size + one-tailed FDR
+facet_labs <- ad_results_hypoad %>%
+  filter(ID %in% genes_to_plot) %>%
+  mutate(lab = ID) %>%
+  ungroup() %>% 
+  dplyr::select(ID, lab) %>%
+  deframe()
+
+ad_results_hypoad$adj_p_one_tail = ad_results_hypoad$adj.P.Val.oneway
+saveRDS(ad_results_hypoad,"dreamlet_hypoad_validation_medial_mb.rds")
+```
+
+Hypoad plot
+```{r}
+library(ggsignif)
+
+
+
+# --- significance annotations ---
+sig_labels <- ad_results_hypoad %>%
+  filter(ID %in% genes_to_plot) %>%
+  mutate(
+    annotations = case_when(
+      adj_p_one_tail < 0.001 ~ "***",
+      adj_p_one_tail < 0.01  ~ "**",
+      adj_p_one_tail < 0.05  ~ "*",
+      TRUE                   ~ ""
+    )
+  ) %>%
+  dplyr::select(ID, annotations) %>%
+  dplyr::rename(gene = ID) %>%
+  mutate(gene = factor(gene, levels = genes_to_plot))
+
+star_df <- plot_df %>%
+  group_by(gene) %>%
+  summarise(ymax   = max(log2_cpm, na.rm = TRUE),
+            yrange = diff(range(log2_cpm, na.rm = TRUE)),
+            .groups = "drop") %>%
+  left_join(sig_labels, by = "gene") %>%
+  mutate(
+    xmin       = 1,
+    xmax       = 2,
+    y_position = ymax + yrange * 0.08
+  )
+
+# --- plot ---
+color_ad_ctl = c("ctl" ="#a1bad4","ad"="#f6b2ba")
+
+
+mb_deg_validation_plots <- ggplot(plot_df, aes(x = ad, y = log2_cpm, fill = ad)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, size = 2) +
+    geom_signif(
+      data        = star_df,
+      aes(xmin = xmin, xmax = xmax,
+          annotations = annotations,
+          y_position  = y_position),
+      manual      = TRUE,
+      textsize    = 5,
+      vjust       = .3,
+      tip_length  = 0.02,
+      inherit.aes = FALSE
+    ) +
+  facet_wrap(~ gene, scales = "free_y",
+             labeller = labeller(gene = facet_labs), nrow = 2) +
+  scale_x_discrete(labels = c(ctl = "Control", ad = "AD")) +
+  labs(x = NULL, y = expression(log[2]~"CPM"),
+       title = "") +
+  scale_fill_manual(values = color_ad_ctl) +
+  theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(face = "bold",color = "black",size = 15),
+        panel.grid.minor = element_blank())
+
+ggsave("hypoad-medial-mb-validation-degs.pdf",
+       mb_deg_validation_plots, width = 8, height = 8)
+```
+
+```{r}
+# --- Mouse medial MB validated DEGs — one plot per cluster, combined with patchwork ---
+library(patchwork)
+
+intermediate_dreamlet = qs2::qs_read("../shared objs and code/intermediate_dreamlet_obj.qs2")
+
+sig_human_mb_genes <- ad_results_hypoad %>%
+  filter(adj.P.Val.oneway < .05) %>%
+  pull(ID)
+
+mouse_mb_validated <- dreamlet_results %>%
+  filter(!is.na(human_gene), human_gene %in% sig_human_mb_genes) %>%
+  dplyr::select(gene, cluster, human_gene, logFC, adj.P.Val) %>%
+  distinct()
+
+mouse_mb_clusters <- c("51_Slc17a6_Ptger3_Gpr83","36_Slc17a6_Nts")
+
+cluster_labels <- c(
+  "51_Slc17a6_Ptger3_Gpr83" = "Ptger3+/Gpr83+",
+  "36_Slc17a6_Nts"          = "Nts"
+)
+
+color_ntg_5xfad <- c("Ntg" = "#a1bad4", "5XFAD" = "#f6b2ba")
+
+color_mapping_strains_to_colors <- c(
+  "B6xBXD14" = "#77AADD",  "B6xBXD77" = "#EE8866",
+  "B6xBXD2Gpnmb" = "#EEDD88", "B6xBXD39" = "#FFAABB",
+  "B6xBXD19" = "#99DDFF",  "B6xBXD169" = "#44BB99",
+  "B6xBXD28" = "#BBCC33",  "B6xBXD12" = "#AAAA00",
+  "B6xBXD73" = "#DDDDDD",  "B6" = "#000000"
+)
+# --- Build one tidy frame across clusters, facet by gene (cluster) ---
+mouse_mb_tidy <- lapply(mouse_mb_clusters, function(clust) {
+  clust_genes <- mouse_mb_validated %>%
+    filter(cluster == clust) %>%
+    pull(gene) %>% unique()
+
+  extractData(intermediate_dreamlet, assay = clust, genes = clust_genes) %>%
+    pivot_longer(cols = all_of(clust_genes),
+                 names_to = "gene", values_to = "log_expression") %>%
+    mutate(cluster = clust)
+}) %>%
+  bind_rows() %>%
+  filter(age_genotype %in% c("old_Ntg", "old_5XFAD") & sex == "Female") %>%
+  mutate(panel = paste0(gene, " (", cluster_labels[cluster], ")"))
+
+# panel ordering: all genes but RHBDL3, then RHBDL3 (since only gene in two clusters)
+
+panel_order = c("Tgfb2 (Ptger3+/Gpr83+)","Rhbdl3 (Ptger3+/Gpr83+)","Rhbdl3 (Nts)","Bmper (Ptger3+/Gpr83+)","Myo16 (Ptger3+/Gpr83+)")
+
+mouse_mb_tidy$panel <- factor(mouse_mb_tidy$panel, levels = panel_order)
+
+# --- significance annotations ---
+mouse_mb_sig_labels <- mouse_mb_validated %>%
+  mutate(
+    panel = paste0(gene, " (", cluster_labels[cluster], ")"),
+    annotations = case_when(
+      adj.P.Val < 0.001 ~ "***",
+      adj.P.Val < 0.01  ~ "**",
+      adj.P.Val < 0.05  ~ "*",
+      TRUE               ~ ""
+    )
+  ) %>%
+  dplyr::select(panel, annotations) %>%
+  mutate(panel = factor(panel, levels = panel_order))
+
+mouse_mb_star_df <- mouse_mb_tidy %>%
+  group_by(panel) %>%
+  summarise(ymax   = max(log_expression, na.rm = TRUE),
+            yrange = diff(range(log_expression, na.rm = TRUE)),
+            .groups = "drop") %>%
+  left_join(mouse_mb_sig_labels, by = "panel") %>%
+  mutate(
+    xmin       = 1,
+    xmax       = 2,
+    y_position = ymax + yrange * 0.08
+  )
+
+# --- single plot, one facet per gene-cluster pair ---
+mouse_mb_degs_plot <- ggplot(
+  mouse_mb_tidy,
+  aes(x = genotype, y = log_expression, fill = genotype)
+) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, aes(color = strain), size = 2) +
+  geom_signif(
+    data        = mouse_mb_star_df,
+    aes(xmin = xmin, xmax = xmax,
+        annotations = annotations,
+        y_position  = y_position),
+    manual      = TRUE,
+    textsize    = 5,
+    vjust       = .3,
+    tip_length  = 0.02,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ panel, scales = "free_y", nrow = 2) +
+  scale_x_discrete(labels = c("Ntg" = "Ntg", "5XFAD" = "5XFAD")) +
+  scale_fill_manual(name = "Genotype", values = color_ntg_5xfad) +
+  scale_color_manual(name = "Strain", values = color_mapping_strains_to_colors) +
+  guides(color = "none",fill= "none") +
+  labs(x = NULL, y = expression(log[2]~"CPM"),
+       title = "") +
+  theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(face = "bold",color = "black",size = 15),
+        panel.grid.minor = element_blank())
+ggsave("mouse_medial_mb_sig_degs_females.pdf",
+       mouse_mb_degs_plot, width = 10, height = 8)
+```
+

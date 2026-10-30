@@ -1,0 +1,522 @@
+---
+title: "differential gene expression correlation with phenotype"
+output: html_document
+date: "2026-05-20"
+---
+
+Correlation of transcriptomic changes (neuropeptide/receptor genes) with phenotype changes across strains (CFA, CFM, sensorimotor, weight, lean prct)
+
+Chunk 1: Load libraries, filter to animal/cluster pairs w/ > 30 cells (ensures adequate representation) and clean metadata
+```{r}
+library(tidyverse)
+library(BPCells)
+library(ggrepel)
+library(patchwork)
+library(ggtext)
+
+#a. identify strains we have in gene expression data (subset of larger number of strains in phenotype data)
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>%
+  dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>%
+  dplyr::rename("age" = "Age (months)", "strain" = "Line.short",
+                "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+strains_present = unique(animal_metadata$strain)
+
+#b. load full phenotype dataset (contains all behavioral variables including calorimetry)
+full_pheno_dset = read_csv("../shared objs and code/calo_bx_data_clean_20260501.csv")
+full_pheno_dset = full_pheno_dset %>% filter(Diet == "Chow")
+full_pheno_dset$strain = full_pheno_dset$Line.short
+full_pheno_dset <- full_pheno_dset %>%
+  mutate(sleep_24hrtotal = sleep_24hrtotal / 3600)   # seconds -> hours
+
+neuronal_assignments <- readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+non_neuronal_assignments =  readRDS("../shared objs and code/non_neuronal_assignments.rds")
+# Combine all assignments into a single dataframe
+assignments_df <- data.frame(
+  cluster = c(neuronal_assignments, non_neuronal_assignments),
+  cell_id = c(names(neuronal_assignments), names(non_neuronal_assignments))
+)
+
+# Load the conversion file for internal cluster IDs to official names
+df_internal_and_official_name <- read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+
+# Convert numeric neuronal cluster IDs to their official names
+assignments_df <- assignments_df %>%
+  mutate(cluster = case_when(
+    cluster %in% df_internal_and_official_name$numeric_id ~ df_internal_and_official_name$official_name[match(cluster, df_internal_and_official_name$numeric_id)],
+    .default = cluster
+  ))
+
+
+assignments_df$animal_id = sub(".*_([0-9]+)-.*", "\\1", assignments_df$cell_id)
+assignments_df$animal_cluster = paste(assignments_df$animal_id, assignments_df$cluster, sep = "_")
+#remove animal/clusters with less than 30 cells
+assignments_df = assignments_df %>% group_by(animal_cluster) %>% add_tally(name = "cell_count")
+assignments_df = assignments_df %>% filter(cell_count >= 30)
+#add strain and sex
+assignments_df$strain = animal_metadata$strain[match(assignments_df$animal_id, animal_metadata$animal_id)]
+assignments_df$sex = animal_metadata$sex[match(assignments_df$animal_id, animal_metadata$animal_id)]
+assignments_df$age = animal_metadata$age[match(assignments_df$animal_id, animal_metadata$animal_id)]
+assignments_df$genotype = animal_metadata$genotype[match(assignments_df$animal_id, animal_metadata$animal_id)]
+
+# Keep the full assignments_df ungrouped for downstream subsetting
+assignments_df = assignments_df %>% ungroup()
+
+#check - stop if > 1 per sex/strain/genotype/age (should max be 1)
+stopifnot(all(
+  (assignments_df %>%
+     distinct(animal_id, sex, strain, genotype, age) %>%
+     count(sex, strain, genotype, age) %>%
+     pull(n)) == 1
+))
+
+
+#Load DE results, and filter to genes/clusters with significant 5x vs Ntg comparisons of either sex/age
+de_results = qs2::qs_read("../shared objs and code/dreamlet_de_results_all_contrasts.qs2") %>%
+  ungroup() %>%
+  filter(adj.P.Val < .05) %>%
+  filter(comparison %in% c("prolonged_amyloid_contrast_m","prolonged_amyloid_contrast_f","early_amyloid_contrast_m","early_amyloid_contrast_f"))
+
+#get gene and cluster set to do pseudobulk on
+gene_set = de_results$gene %>% unique
+cluster_set = de_results$cluster %>% unique
+```
+
+Chunk 2: a) Screen clusters to determine if there's at least 8 strains with both Ntg and 5XFAD animals (do this per sex). b) Get pseudobulk log1p normalized expression values for the cluster/gene set, and associated metadata.
+```{r}
+
+#a) Screen clusters to determine if there's at least 8 strains with both Ntg and 5XFAD animals.
+screen_clusters_for_age <- function(age_val,
+                                    assignments_df,
+                                    cluster_set,
+                                    min_strains_per_cluster_sex = 8) {
+
+  #ad = shorthand for assignments_df
+  ad <- assignments_df %>%
+    filter(age == age_val, cluster %in% cluster_set)
+
+  ad_count <- ad %>%
+    group_by(strain, sex, cluster) %>%
+    summarize(n_animals = n_distinct(animal_id), .groups = "drop")
+
+  # keep only strains where both 5xFAD and Ntg pass the 30-cell filter
+  clusters_per_sex <- ad_count %>%
+    filter(n_animals == 2) %>%
+    group_by(cluster, sex) %>%
+    summarize(n_strains = n_distinct(strain), .groups = "drop") %>%
+    filter(n_strains >= min_strains_per_cluster_sex)
+  
+  clusters_per_sex = clusters_per_sex %>% mutate(cluster_sex = paste(cluster, sex, sep = "_"))
+  ad = ad %>% mutate(cluster_sex = paste(cluster, sex, sep = "_"))
+  
+  #filter ad (assignments_df) to clusters (per sex) that satisfied the number of animals/cell count per animal threshold
+  ad = ad %>% filter(cluster_sex %in% clusters_per_sex$cluster_sex)
+  
+  list(
+    ad               = ad,
+    clusters_per_sex = clusters_per_sex
+  )
+}
+
+#b) Get pseudobulk log1p normalized expression values for the cluster/gene set, and associated metadata.
+build_pseudobulk_for_age <- function(age_val, screen_result, animal_metadata, gene_set) {
+
+  ad               <- screen_result$ad
+  clusters_per_sex <- screen_result$clusters_per_sex
+
+  # load, normalize, subset genes, pseudobulk
+  ge <- open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")[, ad$cell_id]
+  ge <- log1p(multiply_cols(ge, 1 / Matrix::colSums(ge)) * 1e6)
+  ge <- ge[rownames(ge) %in% gene_set, ]
+
+  pb <- pseudobulk_matrix(ge, cell_groups = ad$animal_cluster, method = "mean", threads = 10L)
+
+  meta <- data.frame(
+    animal_cluster = colnames(pb),
+    animal_id      = sub("_.*", "", colnames(pb)),
+    cluster        = sub("^[0-9]+_", "", colnames(pb))
+  ) %>%
+    left_join(animal_metadata %>% dplyr::select(animal_id, strain, sex, genotype, age),
+              by = "animal_id")
+
+  message(sprintf("Age %d: %d samples, %d cluster/sex combos",
+                  age_val, nrow(meta), nrow(clusters_per_sex)))
+
+  list(clusters_per_sex = clusters_per_sex, pseudobulk_metadata = meta, pseudobulk_log_filtered = pb)
+}
+
+# Usage — screen first, then build
+screen_6  <- screen_clusters_for_age(6,  assignments_df, cluster_set)
+screen_14 <- screen_clusters_for_age(14, assignments_df, cluster_set)
+
+pb_6  <- build_pseudobulk_for_age(6,  screen_6,  animal_metadata, gene_set)
+pb_14 <- build_pseudobulk_for_age(14, screen_14, animal_metadata, gene_set)
+```
+
+
+This chunk was adapted from other code where I filtered genes based on num animals detected and expression level; since all are DEGs (as assessed by dreamlet), will not filter out any here)
+```{r}
+identify_eligible_genes <- function(clusters_per_sex,
+                                    pseudobulk_metadata,
+                                    pseudobulk_log_filtered,
+                                    detect_threshold = 2,
+                                    min_animals_detected = 5) {
+
+  gene_eligibility_list = list()
+
+  for (sex_val in c("Male", "Female")) {
+    clusters_this_sex = clusters_per_sex %>%
+      filter(sex == sex_val) %>%
+      pull(cluster)
+
+    for (clust in clusters_this_sex) {
+      samples_ntg = pseudobulk_metadata %>%
+        filter(cluster == clust, sex == sex_val, genotype == "Ntg") %>%
+        pull(animal_cluster)
+      samples_5xfad = pseudobulk_metadata %>%
+        filter(cluster == clust, sex == sex_val, genotype == "5XFAD") %>%
+        pull(animal_cluster)
+
+      expr_ntg = pseudobulk_log_filtered[, samples_ntg, drop = FALSE]
+      expr_5xfad = pseudobulk_log_filtered[, samples_5xfad, drop = FALSE]
+
+      n_animals_expr_ntg = Matrix::rowSums(expr_ntg >= detect_threshold)
+      n_animals_expr_5xfad = Matrix::rowSums(expr_5xfad >= detect_threshold)
+
+      eligible_genes = rownames(pseudobulk_log_filtered)[
+        (n_animals_expr_ntg >= min_animals_detected |
+         n_animals_expr_5xfad >= min_animals_detected)
+      ]
+
+      if (length(eligible_genes) > 0) {
+        gene_eligibility_list[[paste(clust, sex_val, sep = "_")]] = data.frame(
+          gene = eligible_genes,
+          cluster = clust,
+          sex = sex_val
+        )
+      }
+    }
+  }
+  bind_rows(gene_eligibility_list)
+}
+
+eligible_genes_6 = identify_eligible_genes(pb_6$clusters_per_sex,
+                                           pb_6$pseudobulk_metadata,
+                                           pb_6$pseudobulk_log_filtered,
+                                          detect_threshold = 0,
+                                          min_animals_detected =0)
+eligible_genes_14 = identify_eligible_genes(pb_14$clusters_per_sex,
+                                            pb_14$pseudobulk_metadata,
+                                            pb_14$pseudobulk_log_filtered,
+                                          detect_threshold = 0,
+                                          min_animals_detected =0)
+
+```
+
+Produce the list of comparisons to test - the genes that are DEGs at 6 months for the 6 month transcriptome to 14 month phenotype comparisons, and the genes that are DEGs at 14 months for the 14 month transcriptome to 14 month phenotype comparisons. eligible_genes_6 - 6 month transcriptional; eligible_genes_14 - 14 month transcriptional
+```{r}
+# early amyloid DEGs -> 6 mo expression, prolonged amyloid DEGs -> 14 mo expression
+sig_pairs_6 <- de_results %>%
+  filter(comparison %in% c("early_amyloid_contrast_m", "early_amyloid_contrast_f")) %>%
+  mutate(sex = if_else(comparison == "early_amyloid_contrast_m", "Male", "Female")) %>%
+  distinct(gene, cluster, sex)
+
+sig_pairs_14 <- de_results %>%
+  filter(comparison %in% c("prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f")) %>%
+  mutate(sex = if_else(comparison == "prolonged_amyloid_contrast_m", "Male", "Female")) %>%
+  distinct(gene, cluster, sex)
+
+#filter the genes in eligible_genes_6 that are in sig_pairs_6 for a given gene/cluster/sex
+eligible_genes_6  <- eligible_genes_6  %>% semi_join(sig_pairs_6,  by = c("gene", "cluster", "sex"))
+eligible_genes_14 <- eligible_genes_14 %>% semi_join(sig_pairs_14, by = c("gene", "cluster", "sex"))
+```
+
+
+Get the difference in expression between 5xfad and Ntg animals for a given comparison. Comparison here is specific to a given gene, cluster, age, and sex; we get the difference in log normalized expression across strains for this group.
+```{r}
+#eligible_genes_df contains all the genes/clusters/sex groups to perform correlation analysis with
+compute_expr_changes <- function(eligible_genes_df,
+                                  pseudobulk_metadata,
+                                  pseudobulk_log_filtered) {
+  expr_changes_list = list()
+
+  for (i in seq_len(nrow(eligible_genes_df))) {
+    gene = eligible_genes_df$gene[i]
+    clust = eligible_genes_df$cluster[i]
+    sex_val = eligible_genes_df$sex[i]
+
+    strains_available = pseudobulk_metadata %>%
+      filter(cluster == clust, sex == sex_val) %>%
+      pull(strain) %>% unique()
+
+    for (strain_val in strains_available) {
+      samples_ntg = pseudobulk_metadata %>%
+        filter(cluster == clust, sex == sex_val,
+               genotype == "Ntg", strain == strain_val) %>%
+        pull(animal_cluster)
+      samples_5xfad = pseudobulk_metadata %>%
+        filter(cluster == clust, sex == sex_val,
+               genotype == "5XFAD", strain == strain_val) %>%
+        pull(animal_cluster)
+
+      if (length(samples_ntg) == 1 & length(samples_5xfad) == 1) {#only 1 max per strain/sex/sample/age/genotype
+        expr_ntg = pseudobulk_log_filtered[gene, samples_ntg, drop = FALSE]
+        expr_5xfad = pseudobulk_log_filtered[gene, samples_5xfad, drop = FALSE]
+        log_expr_change = expr_5xfad - expr_ntg
+
+        expr_changes_list[[length(expr_changes_list) + 1]] = data.frame(
+          gene = gene,
+          cluster = clust,
+          sex = sex_val,
+          strain = strain_val,
+          log_expr_change = log_expr_change %>% as.vector()
+        )
+      }
+    }
+  }
+  bind_rows(expr_changes_list)
+}
+
+expr_changes_6mo = compute_expr_changes(eligible_genes_6,
+                                        pb_6$pseudobulk_metadata,
+                                        pb_6$pseudobulk_log_filtered)
+expr_changes_14mo = compute_expr_changes(eligible_genes_14,
+                                         pb_14$pseudobulk_metadata,
+                                         pb_14$pseudobulk_log_filtered)
+
+print(paste("6mo expr-change rows:", nrow(expr_changes_6mo)))
+print(paste("14mo expr-change rows:", nrow(expr_changes_14mo)))
+```
+
+
+Get the difference in all phenotypes between 5xfad and Ntg animals for a given comparison, defined as in the above chunk. 
+```{r}
+compute_all_pheno_changes <- function(full_pheno_dset, phenotype_vars, age_val, strains_present) {
+
+  pheno_age <- full_pheno_dset %>%
+    filter(AgeGrp == age_val, strain %in% strains_present)
+
+  agg <- pheno_age %>%
+    group_by(strain, Sex, Genotype) %>%
+    summarize(across(all_of(phenotype_vars), ~mean(.x, na.rm = TRUE)),
+              .groups = "drop")
+
+  changes <- agg %>%
+    pivot_longer(cols = all_of(phenotype_vars), names_to = "variable", values_to = "value") %>%
+    pivot_wider(names_from = Genotype, values_from = value) %>%
+    mutate(change = `5XFAD` - Ntg) %>%
+    select(strain, sex = Sex, variable, change) %>%
+    pivot_wider(names_from = variable, values_from = change)
+
+  # percent change only for Weight
+  if ("Weight" %in% names(changes)) {
+    # need original Ntg mean to compute pct
+    ntg_weight <- agg %>%
+      filter(Genotype == "Ntg") %>%
+      select(strain, sex = Sex, ntg_weight = Weight)
+
+    changes <- changes %>%
+      left_join(ntg_weight, by = c("strain", "sex")) %>%
+      mutate(Weight_pct = (Weight / ntg_weight) * 100) %>%
+      select(-ntg_weight)
+  }
+
+  changes
+}
+
+phenotype_vars <- c("CFC.PS4", "Sensorimotor_composite", "Lean.prct","Fat.prct", "Weight","sleep_24hrtotal")
+
+pheno_changes_14 <- compute_all_pheno_changes(full_pheno_dset, phenotype_vars, 14, strains_present)
+```
+
+Perform correlation between transcriptome change and phenotype change
+```{r}
+min_strains_for_cor <- 8
+# Bundle each comparison set: eligible genes define what gets tested,
+# paired with their expression changes and age info
+comparison_sets <- list(
+  list(eligible_genes = eligible_genes_6,  expr_changes = expr_changes_6mo,  expr_age = 6,  pheno_age = 14),
+  list(eligible_genes = eligible_genes_14, expr_changes = expr_changes_14mo, expr_age = 14, pheno_age = 14)
+)
+
+all_cor <- list()
+
+# Outer loop: each comparison set (early vs prolonged amyloid)
+for (comp in comparison_sets) {
+
+  # Gene/cluster/sex groups to test come directly from eligible genes
+  groups <- comp$eligible_genes
+  n_groups <- nrow(groups)
+  
+  cur_5x_vs_ntg_expr_change = comp$expr_changes
+  
+  # Inner loop: each phenotype variable
+  for (pheno_var in phenotype_vars) {
+    cor_col <- if (pheno_var == "Weight") "Weight_pct" else pheno_var
+
+    # Attach phenotype change to expression changes for this variable
+    expr_change <- cur_5x_vs_ntg_expr_change %>%
+      left_join(pheno_changes_14 %>% select(strain, sex, pheno_val = all_of(cor_col)),
+                by = c("strain", "sex")) %>%
+      filter(!is.na(pheno_val), !is.na(log_expr_change))
+    
+    
+    # Pre-allocate result vectors - should be 1 for each gene/phenotype comparison (so 1 for each row in groups)
+    out_r       <- rep(NA_real_, n_groups)
+    out_p       <- rep(NA_real_, n_groups)
+    out_ci_low  <- rep(NA_real_, n_groups)
+    out_ci_high <- rep(NA_real_, n_groups)
+    out_n       <- integer(n_groups)
+    out_plot_data <- vector("list", n_groups) #store plotting data
+    
+    for (i in seq_len(n_groups)) {
+      # Subset to strains for this sex/cluster/gene group
+      group_data <- expr_change %>%
+        filter(sex == groups$sex[i], cluster == groups$cluster[i], gene == groups$gene[i])
+      out_plot_data[[i]] = group_data
+      out_n[i] <- n_distinct(group_data$strain)
+      
+      
+      # Check if min number of strains for both expr and phenotype for this comparison
+      if (out_n[i] < min_strains_for_cor) next
+
+      x <- group_data$log_expr_change  # transcriptomic change (5XFAD - Ntg)
+      y <- group_data$pheno_val        # phenotype change (5XFAD - Ntg)
+
+      # Skip if either variable has zero variance (cor undefined)
+      if (var(x, na.rm = TRUE) == 0 || var(y, na.rm = TRUE) == 0) next
+
+      res <- cor.test(x, y, method = "pearson")
+      out_r[i]       <- unname(res$estimate)
+      out_p[i]       <- res$p.value
+      out_ci_low[i]  <- res$conf.int[1]
+      out_ci_high[i] <- res$conf.int[2]
+    }
+
+    # Assemble results, FDR-correct within each sex/cluster
+    key <- paste0(pheno_var, "_pheno", comp$pheno_age, "mo_expr", comp$expr_age, "mo")
+    
+    #compile results
+    results_df = groups %>%
+      mutate(n_strains = out_n, r_value = out_r, ci_low = out_ci_low,
+             ci_high = out_ci_high, p.value = out_p,
+             phenotype = pheno_var, pheno_age = comp$pheno_age, expr_age = comp$expr_age, plotting_data = out_plot_data)
+    
+    all_cor[[key]] <-  results_df
+
+  }
+}
+
+full_results_df = bind_rows(all_cor)
+
+full_results_df = full_results_df %>% 
+      filter(!is.na(r_value)) %>%
+      group_by(sex, cluster,pheno_age,expr_age,phenotype) %>%
+      mutate(fdr = p.adjust(p.value, method = "BH")) %>%
+      ungroup()
+
+
+write_csv(full_results_df, "all_transcriptome_phenome_associations_DEGs.csv")
+# Hits passing FDR threshold
+fdr_passed <- full_results_df %>% filter(fdr < .1)
+```
+
+Plot selected for figure 
+```{r}
+selected_hits <- tribble(
+  ~gene,    ~cluster,                        ~sex,~phenotype,
+  "Arhgef25",  "51_Slc17a6_Ptger3_Gpr83", "Female","CFC.PS4",
+  "Mapk11", "51_Slc17a6_Ptger3_Gpr83",       "Female","CFC.PS4",
+  "Rnf128","40_Mch",                          "Female","sleep_24hrtotal",
+  "Mmd2",   "9_Slc17a6_Galr1_Adora1",        "Female","Lean.prct"
+  )
+
+# find hits in the results table (may appear in multiple phenotype/age combos)
+selected_rows <- fdr_passed %>%
+  semi_join(selected_hits, by = c("gene", "cluster", "sex","phenotype")) %>%
+  arrange(gene, cluster, sex, phenotype, expr_age)
+
+message(nrow(selected_rows), " rows matched across phenotypes/ages")
+
+
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+
+pheno_label <- function(pheno_var) {
+  switch(pheno_var,
+    "Weight"                 = "Weight % Change",
+    "Lean.prct"              = "Change in Lean Mass Percent",
+    "CFC.PS4"                = "Change in CFA",
+    "Sensorimotor_composite" = "Change in Sensorimotor",
+    "sleep_24hrtotal"        = "Change in hours slept",
+    paste0("Change in ", pheno_var)
+  )
+}
+
+
+selected_rows = selected_rows %>% arrange(phenotype)
+plots <- list()
+for (i in seq_len(nrow(selected_rows))) {
+  
+  
+  row <- selected_rows[i, ]
+  
+  y_axis_pheno_label <- pheno_label(row$phenotype)
+
+  df_plot <- selected_rows$plotting_data[[i]] %>%
+    filter(!is.na(log_expr_change)) %>% 
+    filter(!is.na(pheno_val))
+
+  xlab = paste0("*", row$gene, "* expression change<br>(5XFAD - Ntg ", row$expr_age, " mo)")
+    
+  ylab = paste0(y_axis_pheno_label, " (5XFAD - Ntg ", row$pheno_age, " mo)")
+  
+  p <- ggplot(df_plot, aes(x = log_expr_change, y = pheno_val, label = strain)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50", alpha = .3) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50", alpha = .3) +
+    geom_smooth(method = "lm", formula = y ~ x, se = F,
+                color = "#FBAD35", alpha = 0.15) +
+    geom_point(aes(color = strain),size = 7) +
+    annotate("text", x = -Inf, y = -Inf,
+             label = sprintf("r = %.2f\nFDR = %s",
+                             row$r_value, signif(row$fdr, 2)),
+             hjust = -0.1, vjust = -0.3, size = 7, fontface = "bold") +
+    theme_bw(base_size = 15) +
+      scale_color_manual(name = "Strain", values = color_mapping_strains_to_colors) +
+    theme(
+          axis.title.y = element_text(face = "bold"),
+          axis.title.x = element_markdown(face = "bold"))+
+      guides(color = "none", fill = "none") +
+    labs(subtitle = paste0(row$cluster, " | ", row$sex),
+         x = xlab,
+         y = ylab)
+  plots[[length(plots) + 1]] <- p
+}
+
+message(length(plots), " panels to plot")
+
+n_cols <- 2
+n_rows <- 2
+
+combined <- wrap_plots(plots, ncol = n_cols) +
+  plot_annotation(
+    theme = theme(plot.title = element_text(face = "bold", size = 13, hjust = 0.5))
+  )
+
+ggsave("selected_gene_cluster_hits.pdf",
+       combined,
+       width = 10, height = 10,
+       limitsize = FALSE)
+
+```

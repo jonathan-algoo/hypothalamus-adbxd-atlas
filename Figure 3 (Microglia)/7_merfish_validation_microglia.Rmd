@@ -1,0 +1,804 @@
+---
+title: "spatial validation analysis of microglia"
+output: html_document
+date: "2026-09-27"
+---
+
+
+```{r load}
+library(Seurat)
+library(anndataR)
+library(Matrix)
+library(ggplot2)
+library(tidyverse)
+library(BPCells)
+library(harmony)
+library(recipes)
+library(themis)
+library(caret)
+library(xgboost)
+library(ranger)
+library(glmnet)
+set.seed(501)
+
+adata <- read_h5ad("../shared objs and code/external mouse datasets/johnston et al MERFISH_Data.h5ad", as = "HDF5AnnData")
+
+counts <- adata$layers[["RNA"]] |> t() |> as("dgCMatrix")
+dimnames(counts) <- list(adata$var_names, adata$obs_names)
+
+meta <- as.data.frame(adata$obs)
+rownames(meta) <- adata$obs_names
+
+#add sex based on batch
+#batch 1 - female
+#batch 2 - ntg: trem2r47h male; 5xfad - female
+#batch 3 - 5 male
+
+
+spatial_obj <- CreateSeuratObject(counts = counts, meta.data = meta, assay = "RNA")
+
+mic_seurat <- spatial_obj[, spatial_obj$cluster == "Mic" & spatial_obj$region_labels == "Hypothalamus"]
+
+# Genes detected in >= 50 microglia
+mic_counts <- LayerData(mic_seurat, assay = "RNA", layer = "counts")
+keep_genes <- rownames(mic_counts)[rowSums(mic_counts > 0) >= 50]
+mic_seurat <- mic_seurat[keep_genes, ]
+
+# Cells with > 100 counts (recomputed on the kept genes)
+mic_seurat$nCount_kept <- colSums(LayerData(mic_seurat, assay = "RNA", layer = "counts"))
+summary(mic_seurat$nCount_kept)
+sum(mic_seurat$nCount_kept > 100)   # check how many cells survive before committing
+mic_seurat <- mic_seurat[, mic_seurat$nCount_kept > 100]
+
+spatial_mic_ge <- LayerData(mic_seurat, assay = "RNA", layer = "counts")
+spatial_meta   <- mic_seurat@meta.data
+```
+
+
+Load snRNA-seq reference and subset to shared genes
+```{r ref-setup}
+mouse_ge_all <- open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+non_neuronal_cluster_assignments <- readRDS("../shared objs and code/non_neuronal_assignments.rds")
+
+mic_labels <- setNames(as.character(non_neuronal_cluster_assignments),
+                       names(non_neuronal_cluster_assignments))
+mic_labels <- mic_labels[grepl("^microglia", mic_labels)]
+table(mic_labels)
+
+
+shared_genes <- intersect(rownames(spatial_mic_ge), rownames(mouse_ge_all))
+snrna_mic_ge <- mouse_ge_all[shared_genes, names(mic_labels)]
+
+spatial_mic_ge = spatial_mic_ge[shared_genes,]
+```
+
+Joint matrix and metadata
+```{r joint}
+snrna_meta <- tibble(
+  cell_id = paste0("snRNA_", colnames(snrna_mic_ge)),
+  orig_id = colnames(snrna_mic_ge),
+  cluster = unname(mic_labels[colnames(snrna_mic_ge)]),
+  tech    = "snRNA",
+  sample  = NA_character_,
+  gen     = NA_character_
+)
+merfish_meta <- tibble(
+  cell_id = paste0("merfish_", colnames(spatial_mic_ge)),
+  orig_id = colnames(spatial_mic_ge),
+  cluster = NA_character_,
+  tech    = "merfish",
+  sample  = as.character(spatial_meta[colnames(spatial_mic_ge), "sample"]),
+  gen     = as.character(spatial_meta[colnames(spatial_mic_ge), "gen"])
+)
+
+
+
+colnames(snrna_mic_ge)   <- snrna_meta$cell_id
+colnames(spatial_mic_ge) <- merfish_meta$cell_id
+
+joint_ge   <- cbind(snrna_mic_ge, spatial_mic_ge)
+joint_meta <- bind_rows(snrna_meta, merfish_meta)
+stopifnot(identical(colnames(joint_ge), joint_meta$cell_id))
+
+table(joint_meta$tech)
+```
+
+
+
+```{r mic-harmony}
+get_pcs_no_var_genes = function(initial_ge_matrix, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #use function to get mean and stdev
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+pcs_micro= get_pcs_no_var_genes(joint_ge, npcs = 20)
+
+harmony_micro = RunHarmony(pcs_micro,meta_data = joint_meta$tech)
+```
+
+
+
+Test 80/20 train/test of xgb, rf, and ridge regression. Choose best performing model for full analysis. 
+```{r classifier-helpers}
+
+# --- align embedding with metadata -------------------------------------------
+emb <- as.matrix(harmony_micro)
+colnames(emb) <- paste0("PC", seq_len(ncol(emb)))
+stopifnot(all(rownames(emb) == joint_meta$cell_id))
+
+snrna_idx <- which(joint_meta$tech == "snRNA")
+spatial_idx <- which(joint_meta$tech == "merfish")
+
+X_snrna <- emb[snrna_idx, , drop = FALSE]#embedding
+y_snrna <- factor(joint_meta$cluster[snrna_idx])#cluster
+X_spatial <- emb[spatial_idx, , drop = FALSE]
+
+# --- 80/20 stratified train/test split ---------------------------------------
+train_idx <- createDataPartition(y_snrna, p = 0.8, list = FALSE)[, 1]
+
+X_train_raw <- X_snrna[train_idx, ]
+y_train_raw <- y_snrna[train_idx]
+X_test      <- X_snrna[-train_idx, ]
+y_test      <- y_snrna[-train_idx]
+
+# --- SMOTE balancing on training set only ------------------------------------
+train_df <- as.data.frame(X_train_raw)
+train_df$cluster <- y_train_raw
+
+train_df_capped <- train_df %>%
+  group_by(cluster) %>%
+  slice_sample(n = 5000) %>%
+  ungroup()
+
+smote_rec <- recipe(cluster ~ ., data = train_df_capped) %>%
+  step_smote(cluster, over_ratio = 1) %>%
+  prep()
+
+train_balanced <- juice(smote_rec)
+X_train <- as.matrix(train_balanced %>% select(-cluster))
+y_train <- train_balanced$cluster
+
+# --- XGBoost -----------------------------------------------------------------
+y_levels    <- levels(factor(y_train))
+y_train_int <- as.integer(factor(y_train, levels = y_levels)) - 1L
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train_int)
+
+params <- list(
+  objective   = "multi:softprob",
+  num_class   = length(y_levels),
+  eval_metric = "mlogloss"
+)
+
+cv_xgb <- xgb.cv(
+  params  = params,
+  data    = dtrain,
+  nrounds = 500,
+  nfold   = 5,
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+xgb_model <- xgb.train(
+  params  = params,
+  data    = dtrain,
+  nrounds = cv_xgb$early_stop$best_iteration
+)
+
+P_xgb_test    <- predict(xgb_model, newdata = X_test)
+xgb_test_pred <- factor(y_levels[max.col(P_xgb_test)], levels = levels(y_test))
+
+# --- Random Forest (ranger) --------------------------------------------------
+rf_model <- ranger(
+  x = X_train,
+  y = factor(y_train),
+  classification = TRUE,
+  seed = 501
+)
+
+rf_test_pred <- predict(rf_model, data = X_test)$predictions
+rf_test_pred <- factor(rf_test_pred, levels = levels(y_test))
+
+# --- Ridge GLMNet ------------------------------------------------------------
+cvfit <- cv.glmnet(
+  x = X_train, y = y_train,
+  family = "multinomial", type.measure = "class",
+  alpha = 0, nfolds = 5, parallel = FALSE
+)
+
+P_glm_test    <- drop(predict(cvfit, newx = X_test, s = "lambda.min", type = "response"))
+glm_test_pred <- factor(colnames(P_glm_test)[max.col(P_glm_test)], levels = levels(y_test))
+
+# --- Compare all three on held-out snrna test set ----------------------------
+cm_xgb <- confusionMatrix(xgb_test_pred, y_test)
+cm_rf  <- confusionMatrix(rf_test_pred,  y_test)
+cm_glm <- confusionMatrix(glm_test_pred, y_test)
+
+summary_df <- data.frame(
+  model             = c("XGBoost", "Random Forest", "Ridge GLMNet"),
+  accuracy          = c(cm_xgb$overall["Accuracy"],
+                        cm_rf$overall["Accuracy"],
+                        cm_glm$overall["Accuracy"]),
+  kappa             = c(cm_xgb$overall["Kappa"],
+                        cm_rf$overall["Kappa"],
+                        cm_glm$overall["Kappa"]),
+  balanced_accuracy = c(mean(cm_xgb$byClass[, "Balanced Accuracy"], na.rm = TRUE),
+                        mean(cm_rf$byClass[, "Balanced Accuracy"],  na.rm = TRUE),
+                        mean(cm_glm$byClass[, "Balanced Accuracy"], na.rm = TRUE))
+)
+
+print(summary_df)
+
+# Per-class F1 for each model
+f1_df <- data.frame(
+  class     = rownames(cm_xgb$byClass),
+  f1_xgb    = cm_xgb$byClass[, "F1"],
+  f1_rf     = cm_rf$byClass[, "F1"],
+  f1_glmnet = cm_glm$byClass[, "F1"]
+)
+
+print(f1_df)
+
+#use random forest because highest f1 for mic-4 (DAM 2 cluster) and mic-5 and highest accuracy
+```
+
+```{r mic-rf-final}
+set.seed(501)
+
+# --- Balance ALL snRNA microglia (same cap + SMOTE as the benchmark) ----------
+full_df <- as.data.frame(X_snrna)
+full_df$cluster <- y_snrna
+
+full_df_capped <- full_df %>%
+  group_by(cluster) %>%
+  slice_sample(n = 5000) %>%
+  ungroup()
+
+full_balanced <- recipe(cluster ~ ., data = full_df_capped) %>%
+  step_smote(cluster, over_ratio = 1) %>%
+  prep() %>%
+  juice()
+
+X_full <- as.matrix(full_balanced %>% select(-cluster))
+y_full <- full_balanced$cluster
+
+# --- Final random forest (probability forest so we get class probabilities) ---
+rf_final <- ranger(
+  x = X_full,
+  y = y_full,
+  probability = TRUE,
+  seed = 501
+)
+
+# --- Predict MERFISH microglia: highest-probability cluster, no unassigned ----
+P_rf_spatial <- predict(rf_final, data = X_spatial)$predictions
+rownames(P_rf_spatial) <- rownames(X_spatial)
+
+mic_assign <- tibble(
+  cell_id  = rownames(P_rf_spatial),
+  cluster  = colnames(P_rf_spatial)[max.col(P_rf_spatial, ties.method = "first")],
+  max_prob = unname(apply(P_rf_spatial, 1, max))
+) %>%
+  left_join(select(joint_meta, cell_id, orig_id, sample, gen), by = "cell_id")
+
+summary(mic_assign$max_prob)
+
+# --- Store on the Seurat object ----------------------------------------------
+m <- match(colnames(mic_seurat), mic_assign$orig_id)
+mic_seurat$rf_cluster  <- setNames(mic_assign$cluster[m],  colnames(mic_seurat))
+mic_seurat$rf_max_prob <- setNames(mic_assign$max_prob[m], colnames(mic_seurat))
+```
+
+
+
+
+```{r cluster-counts}
+drop_r47h <- FALSE   # TRUE = WT vs 5xFAD only (drop Trem2R47H animals)
+
+# ---- Sample x genotype pieces -> animal, sex (from Johnston et al. Methods) ----
+section_info <- spatial_obj[[]] |>
+  distinct(sample, coarse_batch, gen, gen_coarse) |>
+  mutate(across(everything(), as.character)) |>
+  mutate(
+    fad   = factor(if_else(str_detect(gen_coarse, "5xFAD"), "FAD",  "nonFAD"), levels = c("nonFAD", "FAD")),
+    trem2 = factor(if_else(str_detect(gen_coarse, "Trem2"), "R47H", "WT"),     levels = c("WT", "R47H")),
+    sex = case_when(
+      coarse_batch == "1"                  ~ "F",   # WT + 5xFAD, both female
+      coarse_batch == "2" & fad == "FAD"   ~ "F",   # Trem2R47H;5xFAD female
+      coarse_batch == "2"                  ~ "M",   # Trem2R47H male
+      TRUE                                 ~ "M"    # batches 3-5 all male
+    ),
+    animal_id = paste(coarse_batch, gen_coarse, sep = "_")   # replicate slices (batches 1-2) share an ID
+  )
+
+stopifnot(!anyDuplicated(section_info[, c("sample", "gen")]))
+
+animal_info <- section_info |>
+  distinct(animal_id, coarse_batch, gen_coarse, sex, fad, trem2)
+
+stopifnot(nrow(animal_info) == 15)                # paper: 15 animals
+table(animal_info$gen_coarse, animal_info$sex)
+
+if (drop_r47h) {
+  section_info <- filter(section_info, trem2 == "WT")
+  animal_info  <- filter(animal_info,  trem2 == "WT")
+}
+
+# ---- Counts: one row per cluster x animal (zeros filled in) ----
+cluster_counts <- mic_assign |>
+  transmute(sample = as.character(sample), gen = as.character(gen), cluster) |>
+  inner_join(select(section_info, sample, gen, animal_id), by = c("sample", "gen")) |>#get animal id for each sample/genotype
+  dplyr::count(animal_id, cluster, name = "count") |>
+  complete(animal_id, cluster, fill = list(count = 0)) |>
+  left_join(animal_info, by = "animal_id") |>
+  mutate(cluster   = factor(cluster, levels = str_sort(unique(cluster), numeric = TRUE)),
+         animal_id = factor(animal_id))
+
+cluster_counts |>
+  group_by(animal_id, gen_coarse, sex, fad) |>
+  summarise(n_mic = sum(count), .groups = "drop")
+```
+
+
+Plot on the sections 
+```{r mic-spatial, fig.width = 16, fig.height = 12}
+# ---- Panel labels: 5xFAD / Trem2 / sex, ordered so matching animals sit together ----
+panel_info <- section_info |>
+  as_tibble() |>
+  dplyr::select(sample, gen, animal_id, coarse_batch, fad, trem2, sex) |>
+  arrange(fad, trem2, sex, coarse_batch, sample) |>
+  group_by(animal_id) |>
+  mutate(n_slices = n(),
+         slice    = if_else(n_slices > 1, paste0(" · slice ", row_number(), "/", n_slices), "")) |>
+  ungroup() |>
+  mutate(
+    fad_lab   = if_else(fad == "FAD", "5xFAD", "Ntg"),
+    trem2_lab = if_else(trem2 == "R47H", "Trem2 R47H", "Trem2 WT"),
+    sex_lab   = if_else(sex == "F", "Female", "Male"),
+    panel     = paste0(fad_lab, " | ", trem2_lab, " | ", sex_lab, "\n",
+                       "batch ", coarse_batch, slice),
+    panel     = factor(panel, levels = unique(panel))
+  )
+
+# ---- Hypothalamic cells with mapped microglia labels ----
+plot_df <- spatial_obj[[]] |>
+  rownames_to_column("cell") |>
+  dplyr::select(cell, sample, gen, region_labels, center_x, center_y) |>
+  filter(region_labels == "Hypothalamus") |>
+  mutate(sample = as.character(sample), gen = as.character(gen)) |>
+  inner_join(dplyr::select(panel_info, sample, gen, panel), by = c("sample", "gen")) |>
+  left_join(dplyr::select(mic_assign, cell = orig_id, mapped_cluster = cluster), by = "cell") |>
+  mutate(
+    highlight = case_when(
+      mapped_cluster %in% c("microglia-4", "microglia-5") ~ mapped_cluster,
+      !is.na(mapped_cluster)                              ~ "other post-qc microglia",
+      TRUE                                                ~ "background"
+    ),
+    highlight = factor(highlight, levels = c("background", "other post-qc microglia",
+                                             "microglia-5", "microglia-4"))
+  ) |>
+  group_by(sample, gen) |>                       # each hemisphere on its own origin
+  mutate(x = center_x - min(center_x),
+         y = center_y - min(center_y)) |>#change scale
+  ungroup() |>
+  arrange(highlight)                             # highlighted cells drawn on top
+
+dam_validation_on_sections = ggplot() +
+  geom_point(data = filter(plot_df, highlight == "background"),
+             aes(x, y), color = "grey90", size = 0.3, shape = 16) +
+  geom_point(data = filter(plot_df, highlight != "background"),
+             aes(x, y, color = highlight), size = 1.2, shape = 16) +
+  scale_color_manual(
+    values = c(`microglia-4`              = "#E69F00",
+               `microglia-5`              = "#56B4E9",
+               `other post-qc microglia`  = "black"),
+    breaks = c("microglia-4", "microglia-5", "other post-qc microglia"),
+    name   = NULL
+  ) +
+  facet_wrap(~ panel) +
+  coord_fixed() + scale_y_reverse() +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  theme_void() +
+  theme(legend.position = "bottom", strip.text = element_text(size = 8)) +
+  ggtitle("Microglia-4 and microglia-5 in MERFISH hypothalamus")
+
+ggsave("dam-mic-validation-merfish.pdf",dam_validation_on_sections, width = 10, height = 10)
+```
+
+
+```{r model-prep}
+library(sccomp)
+library(voomCLR)
+library(limma)
+library(ANCOMBC)
+library(TreeSummarizedExperiment)
+
+# Drop inherited cell-level row names; sex as a factor, male = reference (coefficient: sexF)
+animal_info <- animal_info |>
+  as_tibble() |>
+  mutate(sex = factor(sex, levels = c("M", "F")))
+
+cluster_counts <- cluster_counts |>
+  as_tibble() |>
+  mutate(sex = factor(sex, levels = c("M", "F")))
+
+table(animal_info$fad, animal_info$sex)
+```
+
+sccomp
+```{r sccomp}
+sccomp_formula = ~fad + sex
+model <- cluster_counts %>%
+  sccomp_estimate(
+    formula_composition = sccomp_formula,
+    sample     = "animal_id",
+    cell_group = "cluster",
+    abundance  = "count",
+    bimodal_mean_variability_association = TRUE
+  )
+model <- model %>% sccomp_remove_outliers(percent_false_positive = 10)
+
+contrast_formula = "fadFAD"
+contrast_result <- model %>%
+    sccomp_test(contrast_formula, test_composition_above_logit_fold_change = 0)
+
+```
+
+voomCLR
+```{r voomclr}
+counts_wide <- cluster_counts |>
+  select(cluster, animal_id, count) |>
+  pivot_wider(names_from = animal_id, values_from = count, values_fill = 0) |>
+  column_to_rownames("cluster")
+
+animal_meta <- animal_info |>
+  filter(animal_id %in% colnames(counts_wide)) |>
+  arrange(match(animal_id, colnames(counts_wide)))
+stopifnot(identical(as.character(animal_meta$animal_id), colnames(counts_wide)))
+
+design_mat <- model.matrix(~ fad + sex, data = animal_meta)
+colnames(design_mat) <- make.names(colnames(design_mat))
+
+# voomCLR
+v <- voomCLR(counts_wide, design = design_mat, varCalc = "analytical")
+fit <- lmFit(v, design_mat)
+
+# contrast: ad - ctl
+contrasts <- makeContrasts(tg_vs_ctl = "fadFAD", levels = design_mat)
+contFit <- contrasts.fit(fit, contrasts = contrasts)
+contFit <- eBayes(contFit)
+
+voomclr_results <- topTableBC(contFit, coef = 1, n = Inf,
+                 bootstrap = "parametric",
+                 voomWeights = v$weights,
+                 contrastMatrix = contrasts[, 1, drop = FALSE],
+                 adjust.method = "BH") %>%
+  rownames_to_column(var = "cluster") %>%
+  mutate(contrast = "5xfad_vs_ctl")
+```
+
+ANCOM-BC2
+```{r ancombc2}
+count_mat <- as.matrix(counts_wide)
+
+animal_meta_df <- animal_meta |>
+  as.data.frame() |>
+  remove_rownames() |>
+  column_to_rownames("animal_id")
+animal_meta_df <- animal_meta_df[colnames(count_mat), ]
+
+tse <- TreeSummarizedExperiment(
+  assays  = list(counts = count_mat),
+  colData = animal_meta_df
+)
+
+out <- ancombc2(
+  data         = tse,
+  assay_name   = "counts",
+  fix_formula  = "fad + sex",
+  p_adj_method = "BH",
+  prv_cut      = 0,        # keep every cluster; there are only a handful
+  verbose      = FALSE
+)
+
+ancombc_results <- out$res |>
+  transmute(cluster  = taxon,
+            contrast = "fad_vs_nonfad",
+            lfc   = lfc_fadFAD,
+            se    = se_fadFAD,
+            p_val = p_fadFAD,
+            q_val = q_fadFAD)
+
+library(ANCOMBC)
+library(TreeSummarizedExperiment)
+
+count_mat <- cluster_counts %>%
+  select(cluster, animal_id, count) %>%
+  pivot_wider(names_from = animal_id, values_from = count, values_fill = 0) %>%
+  column_to_rownames("cluster") %>%
+  as.matrix()
+
+meta_df <- cluster_counts %>%
+  distinct(animal_id, .keep_all = TRUE) %>%
+  column_to_rownames("animal_id")
+meta_df <- meta_df[colnames(count_mat), ]
+meta_df$fad <- relevel(factor(meta_df$fad), ref = "nonFAD")
+
+tse <- TreeSummarizedExperiment(
+  assays  = list(counts = count_mat),
+  colData = meta_df
+)
+
+out <- ancombc2(
+  data        = tse,
+  assay_name  = "counts",
+  fix_formula = "fad + sex",
+  p_adj_method = "BH",
+  verbose     = FALSE
+)
+term_name = "fadFAD"
+ancombc_results <- out$res %>%
+  dplyr::select(taxon,
+         lfc = starts_with("lfc_fadFAD"),
+         se  = starts_with("se_fadFAD"),
+         p_val = starts_with("p_fadFAD"),
+         q_val = starts_with("q_fadFAD")) %>%
+  mutate(cluster  = taxon,
+         contrast = "tg_vs_ctl") %>%
+  select(cluster, contrast, lfc, se, p_val, q_val)
+
+```
+
+```{r combine}
+sccomp_collected <- contrast_result |>
+  transmute(cluster = as.character(cluster), contrast = parameter,
+            framework = "sccomp",
+            effect    = c_effect,
+            direction = ifelse(c_effect > 0, "up", "down"),
+            adj_p_val = c_FDR,
+            raw_p_val = NA_real_)
+
+#sccomp doesn't provide raw p values, so will just leave the adjusted one here (relative to other members of its class)
+focus_clusters <- c("microglia-4", "microglia-5")
+
+# two-sided -> one-sided p for H1: effect > 0 (symmetric t / z statistics)
+one_sided_up <- function(p_two, effect) if_else(effect > 0, p_two / 2, 1 - p_two / 2)
+
+voomclr_collected <- voomclr_results |>
+  filter(cluster %in% focus_clusters) |>
+  transmute(cluster, contrast,
+            framework = "voomclr",
+            effect    = logFC,
+            direction = ifelse(logFC > 0, "up", "down"),
+            raw_p_two = P.Value,
+            raw_p_val = one_sided_up(P.Value, logFC)) |>
+  mutate(adj_p_val = p.adjust(raw_p_val, method = "bonferroni"),
+         method    = "one-sided (up), bonferroni")
+
+ancombc_collected <- ancombc_results |>
+  filter(cluster %in% focus_clusters) |>
+  transmute(cluster, contrast,
+            framework = "ancombc2",
+            effect    = lfc,
+            direction = ifelse(lfc > 0, "up", "down"),
+            raw_p_two = p_val,
+            raw_p_val = one_sided_up(p_val, lfc)) |>
+  mutate(adj_p_val = p.adjust(raw_p_val, method = "bonferroni"),
+         method    = "one-sided (up), bonferroni")
+
+
+combined_results <- bind_rows(sccomp_collected, voomclr_collected, ancombc_collected)
+
+
+combined_results = combined_results %>% filter(cluster %in% c("microglia-4","microglia-5"))
+# --- consensus: significant in >= 2 of the 3 frameworks, same direction -------
+sig_at_least_2 <- combined_results |>
+  mutate(raw_p_val = coalesce(raw_p_val, 1)) |>
+  filter(raw_p_val < .1 | adj_p_val < .1) |>
+  group_by(cluster, direction) |>
+  filter(n() >= 2) |>
+  ungroup()
+
+sig_at_least_2
+
+# Everything side by side
+combined_results |>
+  select(cluster, framework, effect, adj_p_val) |>
+  pivot_wider(names_from = framework, values_from = c(effect, adj_p_val)) |>
+  arrange(cluster)
+```
+
+Proportions per animal
+```{r comp-plots, fig.width = 10, fig.height = 5}
+library(patchwork)
+library(ggsignif)
+library(ggtext)
+
+prop_plot_df <- cluster_counts |>
+  group_by(animal_id) |>
+  mutate(total = sum(count), proportion = count / total) |>
+  ungroup() |>
+  mutate(cluster = factor(cluster, levels = str_sort(unique(as.character(cluster)), numeric = TRUE)))
+
+sig_star <- function(p) {
+  case_when(p < 0.001 ~ "***",
+            p < 0.01  ~ "**",
+            p < 0.05  ~ "*",
+            TRUE      ~ "ns")
+}
+
+plot_focus <- function(focus_cluster) {
+  # sccomp FDR for 5xFAD vs Ntg in this cluster
+  sccomp_fdr <- contrast_result |>
+    filter(as.character(cluster) == focus_cluster) |>
+    pull(c_FDR)
+
+  df    <- filter(prop_plot_df, cluster == focus_cluster)
+  y_top <- max(df$proportion) * 1.08
+
+  ggplot(df, aes(x = fad, y = proportion, fill = fad)) +
+    geom_boxplot(outliers = FALSE) +
+    geom_jitter(aes(shape = sex, color = trem2), width = .1, size = 2.5) +
+    geom_signif(
+      data = data.frame(xmin = 1, xmax = 2,
+                        annotations = sig_star(sccomp_fdr),
+                        y_position  = y_top),
+      aes(xmin = xmin, xmax = xmax, annotations = annotations, y_position = y_position),
+      manual      = TRUE,
+      textsize    = 6,
+      vjust       = 0.3,
+      tip_length  = 0.02,
+      inherit.aes = FALSE
+    ) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.12))) +
+    scale_fill_manual(values = c(nonFAD = "#a1bad4", FAD = "#f6b2ba"), guide = "none") +
+    scale_color_manual(values = c(WT = "black", R47H = "#D55E00"),
+                       labels = c(WT = "*Trem2*<sup>WT</sup>", R47H = "*Trem2*<sup>R47H</sup>"),
+                       name   = "*Trem2*") +
+    scale_x_discrete(labels = c(nonFAD = "Ntg", FAD = "5XFAD")) +
+    labs(x = NULL,
+         y = paste("Proportion mapped to", focus_cluster),
+         shape = "Sex") +
+    theme_bw(base_size = 15) +
+    theme(axis.title   = element_text(face = "bold"),
+          axis.text    = element_text(face = "bold", color = "black"),
+          legend.title = element_markdown(),
+          legend.text  = element_markdown(),
+          legend.position = "bottom",
+          panel.grid.minor = element_blank())
+}
+
+full_plot <- plot_focus("microglia-4") + plot_focus("microglia-5") +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+ggsave("merfish_validation_microglia.pdf", full_plot, width = 10, height = 5)
+
+
+
+combined_plot <- dam_validation_on_sections / full_plot +
+  plot_layout(heights = c(2, 1))
+
+combined_plot
+
+ggsave("merfish_validation_microglia_combined.pdf", combined_plot,
+       width = 10, height = 15)
+```
+
+Save mic_assign microglia assignments
+```{r}
+saveRDS(mic_assign, "microglia-post-qc-merfish-assignments.rds")
+```
+
+Plot DAM 1 / 2 markers alongside general dam markers (log1p normalized)
+```{r}
+#markers present from Deczkowska et al, 2018 (Disease-Associated Microglia: A Universal Immune Sensor of Neurodegeneration)
+#homeostatic: "P2ry12", "Tmem119", "Hexb"
+#Stage 1 DAM upregulated - "Apoe", "Trem2", 
+#stage 2 dam upregulated - "Cst7", "Itgax","Ccl6","Csf1"
+dam_markers <- tibble(
+  gene     = c("P2ry12", "Tmem119", "Hexb",
+               "Apoe", "Trem2",
+               "Cst7", "Itgax", "Ccl6", "Csf1"),
+  category = c(rep("Homeostatic", 3), rep("Higher in Stage 1\nDAM than Homeostatic", 2), rep("Higher in Stage 2 DAM\nthan Stage 1 DAM", 4))
+) |>
+  mutate(category = factor(category, levels = unique(category)))
+
+# --- log1p normalize (CP10k; library size from all kept panel genes) ---------
+mic_mat  <- as(LayerData(mic_seurat, assay = "RNA", layer = "counts"), "IterableMatrix")
+mic_norm <- multiply_cols(mic_mat, 1 / Matrix::colSums(mic_mat))
+mic_norm <- log1p(mic_norm * 1e4)
+
+present <- dam_markers$gene[dam_markers$gene %in% rownames(mic_norm)]
+setdiff(dam_markers$gene, present)   # markers missing from panel / removed by the >=50 cell filter
+mic_norm <- mic_norm[present, ]
+
+# --- z-score each gene across all microglia, at the cell level ---------------
+stats   <- matrix_stats(mic_norm, row_stats = "variance")
+gene_mu <- stats$row_stats["mean", ]
+gene_sd <- sqrt(stats$row_stats["variance", ])
+mic_z   <- (mic_norm - gene_mu) / gene_sd
+
+# --- pseudobulk by mapped cluster ---------------------------------------------
+cell_cluster <- mic_seurat$rf_cluster[colnames(mic_z)]
+
+percent_pseudobulk <- (mic_mat[present, ] > 0) |>
+  pseudobulk_matrix(cell_groups = cell_cluster, method = "mean", threads = 8L)
+
+z_pseudobulk <- mic_z |>
+  pseudobulk_matrix(cell_groups = cell_cluster, method = "mean", threads = 8L)
+
+# --- long format for plotting -------------------------------------------------
+pb_long <- function(pb, value_name) {
+  as.data.frame(as.matrix(pb)) |>
+    rownames_to_column("gene") |>
+    pivot_longer(-gene, names_to = "cluster", values_to = value_name)
+}
+
+
+cluster_levels <- c("Microglia-1", "Microglia-2", "Microglia-3",
+                    "Microglia-4 (Stage 2 DAM)", "Microglia-5 (Stage 1 DAM)",
+                    "Microglia-6", "Microglia-7", "Microglia-8", "Microglia-9")
+
+dotplot_df <- inner_join(pb_long(z_pseudobulk, "avg_exp"),
+                         pb_long(percent_pseudobulk, "pct_exp"),
+                         by = c("gene", "cluster")) |>
+  mutate(pct_exp = pct_exp * 100) |>#fraction to %
+  left_join(dam_markers, by = "gene") |> #add label
+  mutate(cluster = str_to_title(cluster),
+         cluster = case_when(
+           cluster == "Microglia-4" ~ "Microglia-4 (Stage 2 DAM)",
+           cluster == "Microglia-5" ~ "Microglia-5 (Stage 1 DAM)",
+           .default = cluster
+         ),
+         gene    = factor(gene, levels = present),
+         cluster = factor(cluster, levels = cluster_levels))
+
+
+stopifnot(!anyNA(dotplot_df$cluster))   # catches any label/level mismatch
+
+# --- dotplot ------------------------------------------------------------------
+dam_marker_plot <- ggplot(dotplot_df, aes(x = gene, y = cluster, fill = avg_exp, size = pct_exp)) +
+  geom_point(shape = 21, color = "black") +
+  facet_grid(~ category, scales = "free_x", space = "free_x") +
+  scale_size_area(max_size = 10, name = "Percent\nExpressed") +
+  scale_fill_gradient2(mid = "white", high = "#D55E00", low = "#0072B2", name = "Scaled\nLog-Normalized\nExpression") +
+  ggtitle("") +
+  theme_classic() +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15, hjust = .5),
+    axis.title.x = element_text(face = "bold", size = 14),
+    axis.title.y = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(face = "bold.italic"),
+    axis.text.y = element_text(face = "bold"),
+    strip.text = element_text(face = "bold"),
+    strip.background = element_blank(),
+    legend.title = element_text(face = "bold", hjust = 0.5),
+    legend.text = element_text(face = "bold", size = 12, hjust = 0.5),
+    legend.position = "right",
+    legend.key.size = unit(.5, "cm")
+  ) +
+  labs(x = "Gene", y = "Mapped Cluster",)
+
+dam_marker_plot
+ggsave("merfish_dam_marker_dotplot.pdf", dam_marker_plot, width = 10, height = 4)
+```
+

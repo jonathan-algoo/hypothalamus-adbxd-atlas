@@ -1,0 +1,400 @@
+---
+title: "dreamlet results process and vis"
+output: html_document
+date: "2025-10-21"
+---
+
+# Load Required Libraries
+
+```{r setup}
+library(dreamlet)
+library(limma)
+library(tidyverse)
+library(BiocParallel)
+library(Seurat)
+library(scales)
+```
+
+## Load results
+```{r}
+dreamlet_results = qs2::qs_read("../shared objs and code/dreamlet_de_results_all_contrasts.qs2")
+```
+
+
+Remove genes within +/- 5mb of tg site
+```{r}
+#tg location from Goodwin et al, 2019 Supplementary info
+transgene_location = 62978636
+library(GenomicFeatures)
+library(TxDb.Mmusculus.UCSC.mm39.knownGene)
+library(org.Mm.eg.db)
+
+# 2. Load the TxDb object
+txdb <- TxDb.Mmusculus.UCSC.mm39.knownGene
+
+# 3. Extract gene boundaries as a GRanges object
+# By default, TxDb packages use Entrez IDs as their primary keys/names
+mouse_genes <- genes(txdb)
+
+# 4. Convert the GRanges object to a standard data frame
+genes_df <- as.data.frame(mouse_genes)
+
+# 5. Map Entrez IDs to Gene Symbols using org.Mm.eg.db
+genes_df$symbol <- mapIds(
+  org.Mm.eg.db,
+  keys = genes_df$gene_id,
+  column = "SYMBOL",
+  keytype = "ENTREZID",
+  multiVals = "first"
+)
+
+
+genes_df_chr3 = genes_df %>% filter(seqnames == "chr3")
+genes_df_chr3 = genes_df_chr3 %>% mutate(
+  distance = transgene_location - start)
+
+genes_df_chr3 = genes_df_chr3 %>% 
+  mutate(within_5_mb = 
+           case_when(
+             abs(distance) < 5e6 ~ T,
+             .default = F
+           ))
+
+genes_df_chr3_within_dist = genes_df_chr3 %>% filter(within_5_mb == T)
+dreamlet_results$possible_tg_artifact = dreamlet_results$gene %in% genes_df_chr3_within_dist$symbol
+```
+
+
+All DEG counts together
+```{r}
+# Count significant genes (FDR < 0.05) per cluster
+sig_counts <- dreamlet_results %>%
+  filter(!possible_tg_artifact) %>% #filter out genes within 5 mb 
+  filter(comparison %in% c("early_amyloid_contrast_m", "early_amyloid_contrast_f","prolonged_amyloid_contrast_m", "prolonged_amyloid_contrast_f")) %>%
+  mutate(sig = adj.P.Val < .05) %>% 
+  group_by(cluster, comparison) %>%
+  summarise(n_sig = sum(sig), .groups = "keep") %>%
+  mutate(sex = case_when(
+    comparison %in% c("prolonged_amyloid_contrast_m","early_amyloid_contrast_m") ~ "M",
+    .default = "F"
+  )) %>% mutate(
+    comparison = case_when(
+      comparison  =="prolonged_amyloid_contrast_m" ~ "Old 5X -- Old Ntg",
+      comparison  =="prolonged_amyloid_contrast_f" ~ "Old 5X -- Old Ntg",
+      comparison  =="early_amyloid_contrast_m" ~ "Young 5X -- Young Ntg",
+      comparison  =="early_amyloid_contrast_f" ~ "Young 5X -- Young Ntg",
+    )
+  ) %>% mutate(
+    sex = case_when(
+      sex  =="M" ~ "Male",
+      sex  =="F" ~ "Female")
+  ) %>% 
+    pivot_wider(names_from = sex, values_from = n_sig)
+
+
+#columns: 
+#color by comparison (Old 5X vs Old Ntg, Young 5X vs Young Ntg), Male (X-axis), Female (Y-axis)
+
+library(ggrepel)
+sig_counts$True_Male = sig_counts$Male
+sig_counts$True_Female = sig_counts$Female
+#get clusts where > 10 in any comparison males or females
+clusts_to_keep = sig_counts %>% filter(Male >= 10 | Female >= 10) %>% pull(cluster) %>% unique
+sig_counts = sig_counts %>% filter(cluster %in% clusts_to_keep)
+sig_counts =sig_counts %>% mutate(label = paste0(" (", True_Male, "M, ", True_Female, "F)"),
+  .default = NA
+)
+sig_counts$comparison = factor(sig_counts$comparison, levels = c("Young 5X -- Young Ntg","Old 5X -- Old Ntg"))
+```
+
+
+
+```{r}
+library(grid)
+library(scales)
+
+brks <- c(0, 2^(0:10))   # 0, 1, 2, 4, ... 1024
+
+sig_counts$comparison = factor(sig_counts$comparison,
+  levels = c("Young 5X -- Young Ntg","Old 5X -- Old Ntg"))
+
+plot_sig_counts = ggplot(sig_counts, aes(x = log2(Male + 1), y = log2(Female + 1), color = cluster)) +
+  geom_path(
+    arrow = arrow(length = unit(.2, "cm"), type = "closed", angle = 25),
+    linewidth = .5,
+    show.legend = FALSE
+  ) +
+  geom_text_repel(
+    aes(label = label), color = "black", max.overlaps = 10,
+    box.padding = 0.5, point.padding = 0.5, nudge_y = 0.1, nudge_x = 0.1,
+    force = 5, segment.size = 0.3, size = 5
+  ) +
+  geom_point(aes(alpha = comparison)) +
+  scale_alpha_manual(values = c(.3, .8), name = "Comparison") +
+  scale_x_continuous(
+    breaks = log2(brks + 1), labels = comma(brks),
+    limits = c(-0.5, 10.2)
+  ) +
+  scale_y_continuous(
+    breaks = log2(brks + 1), labels = comma(brks),
+    limits = c(-0.5, 10.2)
+  ) +
+  labs(
+    title = "Significant DE Genes per Cluster",
+    x = expression(bold("Number of DE Genes, Males (log"[2]*" + 1 scale)")),
+    y = expression(bold("Number of DE Genes, Females (log"[2]*" + 1 scale)")),
+    color = "Cluster"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(face = "bold", color = "black"),
+    strip.text = element_text(face = "bold"),
+    legend.title = element_text(face = "bold")
+  )
+
+ggsave("Combined DEG counts males females.pdf", plot_sig_counts, width = 8, height = 6)
+```
+
+
+
+
+Plot expression of the medial MB marker Foxb1 and lateral MB marker Kcnc2 to identify which clusters exhibit high MB expression
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+
+#plot neuronal/non-neuronal discriminatory gene dotplot separately, then together
+neuron_assignments = readRDS(file = "../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+neuron_names = names(neuron_assignments)
+neuron_assignments = df_internal_and_official_name$official_name[match(neuron_assignments, df_internal_and_official_name$numeric_id)]
+names(neuron_assignments) = neuron_names
+neuronal_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+neuronal_ge = neuronal_ge[,names(neuron_assignments)]
+log_norm_neuronal_ge =   multiply_cols(neuronal_ge, 1/Matrix::colSums(neuronal_ge))
+log_norm_neuronal_ge <- log1p(log_norm_neuronal_ge * 1e6) # Log cpm
+all_neuronal_log_norm = pseudobulk_matrix(log_norm_neuronal_ge, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+all_neuronal_percent = pseudobulk_matrix(neuronal_ge > 0, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+```
+
+
+```{r}
+all_neuronal_percent_df = all_neuronal_percent %>% as.data.frame()
+all_neuronal_percent_df = all_neuronal_percent_df %>% rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "cluster", values_to = "percent_exp")
+
+all_neuronal_exp_df = all_neuronal_log_norm %>% as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "cluster", values_to = "avg_exp")
+
+# Join percent expressing and average expression
+dotplot_df = left_join(all_neuronal_exp_df, all_neuronal_percent_df,
+                       by = c("gene", "cluster"))
+
+
+```
+
+Foxb1 and Rprm (medial MB)
+```{r}
+genes_to_plot = c("Foxb1", "Rprm")
+
+two_gene_df = dotplot_df %>%
+  filter(gene %in% genes_to_plot) %>%
+  group_by(gene) %>%
+  mutate(z_exp = as.numeric(scale(avg_exp))) %>%
+  ungroup()
+
+# Top 10 clusters by Foxb1 expression
+top10_clusters = two_gene_df %>%
+  filter(gene == "Foxb1") %>%
+  slice_max(avg_exp, n = 10) %>%
+  arrange(avg_exp) %>%          # ascending so highest ends up at the top of the y-axis
+  pull(cluster)
+
+# Subset both genes to those clusters and set plotting order
+two_gene_df_10 = two_gene_df %>%
+  filter(cluster %in% top10_clusters) %>%
+  mutate(
+    cluster = factor(cluster, levels = top10_clusters),
+    gene    = factor(gene, levels = genes_to_plot)
+  )
+
+
+
+plot_foxb1_rprm = ggplot(two_gene_df_10,
+                         aes(x = gene, y = cluster, size = percent_exp, fill = z_exp)) +
+  geom_point(shape = 21, color = "black", stroke = 0.3) +
+    scale_fill_gradient2(
+      mid = "white", high = "#D55E00", low = "#0072B2",
+      name = "Mean Log\nExpression"
+    ) +
+  labs(
+    x = "",
+    y = "Cluster",
+    size = "Percent\nExpressing",
+    fill = "Scaled Log-\nNormalized Expression"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+    axis.text.x = element_text(face = "bold.italic"),
+    axis.text.y = element_text(size = 7),
+    legend.title = element_text(face = "bold")
+  )
+ggsave("foxb1_rprm_dotplot_neuronal_clusters.pdf", plot_foxb1_rprm, width = 6, height = 8)
+
+```
+
+
+Kcnc2 (lateral MB) - check - they don't express kcnc2 (didn't put in paper but a good check regardless)
+```{r}
+# Filter for kcnc2
+kcnc2_df = dotplot_df %>% filter(gene == "Kcnc2") %>%
+  mutate(cluster = fct_reorder(cluster, avg_exp, .desc = FALSE))
+
+kcnc2_df$z_exp = scale(kcnc2_df$avg_exp)
+#subset to top 10 for vis
+kcnc2_df_10 = kcnc2_df %>% arrange(desc(avg_exp)) %>% slice_max(avg_exp, n = 10)
+# Dot plot
+plot_kcnc2 = ggplot(kcnc2_df_10, aes(x = gene, y = cluster, size = percent_exp, fill = z_exp)) +
+  geom_point(shape = 21, color = "black", stroke = 0.3) +
+  labs(
+    title = "kcnc2 Expression Across Neuronal Clusters",
+    x = "",
+    y = "Cluster",
+    fill = "Scaled Log-\nNormalized Expression"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+    axis.text.y = element_text(size = 7),
+    legend.title = element_text(face = "bold")
+  )
+
+ggsave("kcnc2_dotplot_neuronal_clusters.pdf", plot_kcnc2, width = 6, height = 8)
+#supplementary figure to establish mammilary body location
+```
+
+
+Save glp1r/lepr hits in females as supplementary table 
+```{r}
+sig_results_glp1r_lepr = dreamlet_results %>% filter(cluster == "44_Glp1r_Lepr", comparison == "prolonged_amyloid_contrast_f") %>% filter(adj.P.Val < .05) %>% arrange(adj.P.Val)
+
+write_csv(x = sig_results_glp1r_lepr, "sig_results_glp1r_lepr_females.csv")
+```
+
+
+
+Plot jak2 pathway sig results in glp1r/lepr in females
+```{r}
+library(qs2)
+library(dreamlet)
+library(ggsignif)
+processed_dreamlet = qs2::qs_read("../shared objs and code/processed_dreamlet.qs2")
+intermediate_dreamlet = readRDS("../shared objs and code/intermediate_dreamlet_obj.rds")
+```
+
+
+```{r}
+glp1r_lepr_jak2_pathway_hits_data = extractData(intermediate_dreamlet, assay = "44_Glp1r_Lepr", genes = c("Stat3", "Sbno2","Asb4"))
+
+glp1r_lepr_jak2_pathway_hits_data_tidy = glp1r_lepr_jak2_pathway_hits_data %>%
+  pivot_longer(cols = c("Stat3","Sbno2","Asb4"), names_to = "gene", values_to = "log_expression")
+
+glp1r_lepr_jak2_pathway_hits_data_tidy$gene = factor(
+  glp1r_lepr_jak2_pathway_hits_data_tidy$gene, levels = c("Stat3","Sbno2","Asb4")
+)
+
+
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+
+color_ntg_5xfad <- c("Ntg" = "#a1bad4", "5XFAD" = "#f6b2ba")
+
+# --- significance annotations from dreamlet results ---
+jak_sig_labels <- dreamlet_results %>%
+  filter(cluster == "44_Glp1r_Lepr",
+         comparison == "prolonged_amyloid_contrast_f",
+         gene %in% c("Stat3", "Sbno2", "Asb4")) %>%
+  mutate(
+    annotations = case_when(
+      adj.P.Val < 0.001 ~ "***",
+      adj.P.Val < 0.01  ~ "**",
+      adj.P.Val < 0.05  ~ "*",
+      TRUE               ~ ""
+    )
+  ) %>%
+  dplyr::select(gene, annotations) %>%
+  mutate(gene = factor(gene, levels = c("Stat3", "Sbno2", "Asb4")))
+
+jak_plot_data <- glp1r_lepr_jak2_pathway_hits_data_tidy %>%
+  filter(age_genotype %in% c("old_Ntg", "old_5XFAD") & sex == "Female")
+
+jak_star_df <- jak_plot_data %>%
+  group_by(gene) %>%
+  summarise(ymax   = max(log_expression, na.rm = TRUE),
+            yrange = diff(range(log_expression, na.rm = TRUE)),
+            .groups = "drop") %>%
+  left_join(jak_sig_labels, by = "gene") %>%
+  mutate(
+    xmin       = 1,
+    xmax       = 2,
+    y_position = ymax + yrange * 0.08
+  )
+
+# --- plot ---
+glp1r_lepr_jak2_plot = ggplot(
+  jak_plot_data,
+  aes(x = genotype, y = log_expression, fill = genotype)
+) +
+  facet_wrap(~ gene, scales = "free_y") +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, aes(color = strain), size = 2) +
+  geom_signif(
+    data        = jak_star_df,
+    aes(xmin = xmin, xmax = xmax,
+        annotations = annotations,
+        y_position  = y_position),
+    manual      = TRUE,
+    textsize    = 5,
+    vjust       = .3,
+    tip_length  = 0.02,
+    inherit.aes = FALSE
+  ) +
+  scale_color_manual(name = "Strain", values = color_mapping_strains_to_colors) +
+  scale_fill_manual(name = "Genotype", values = color_ntg_5xfad) +
+  scale_x_discrete(labels = c("Ntg" = "Ntg", "5XFAD" = "5XFAD")) +
+  labs(,
+    x = NULL,
+    y = "Log Normalized Expression"
+  ) +
+  guides(color = "none", fill = "none") +
+  theme_bw(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+    strip.text = element_text(face = "bold.italic", size = 11),
+    strip.background = element_rect(fill = "grey95", color = NA),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+ggsave("glp1r_lepr_jak2_pathway_females.pdf", glp1r_lepr_jak2_plot, width = 9, height = 4)
+```

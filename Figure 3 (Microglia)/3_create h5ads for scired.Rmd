@@ -1,0 +1,127 @@
+---
+title: "create h5ads for scired"
+output: html_document
+date: "2026-01-05"
+---
+
+
+
+```{r}
+library(reticulate)
+use_condaenv("scired", required = TRUE)
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(patchwork)
+set.seed(1)
+```
+
+Load cell meta
+```{r}
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+```
+
+
+Create microglia h5ad
+```{r}
+#only keep microglia from cell meta
+micro_meta = cell_metadata %>% filter(cell_class == "microglia")
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+genes_to_remove <- rownames(all_ge)[grepl("^Gm|Rik", rownames(all_ge))]
+micro_ge <- all_ge[!rownames(all_ge) %in% genes_to_remove, micro_meta$cell_id]
+
+micro_meta$nUMIs = colSums(micro_ge)
+#Find variable genes and subset to them
+get_var_genes =  function(initial_ge_matrix, n_var_genes = 3000) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes = variable_genes %>% rownames_to_column("gene")
+  variable_genes$gene
+}
+var_genes <- get_var_genes(micro_ge, n_var_genes = 3000)
+micro_ge <- micro_ge[var_genes, ]
+
+
+#create h5ad object
+var_metadata <- data.frame(gene = rownames(micro_ge))
+rownames(var_metadata) <- var_metadata$gene
+
+micro_anndata_obj <- anndata::AnnData(
+  X = NULL, 
+  obs = micro_meta, 
+  var = var_metadata, 
+  shape = c(ncol(micro_ge), nrow(micro_ge))
+)
+
+# Write anndata to h5ad
+#save microglia with var genes only
+anndata::write_h5ad(anndata = micro_anndata_obj, filename = "./microglia.h5ad")
+BPCells::write_matrix_anndata_hdf5(mat = micro_ge, path = "./microglia.h5ad", group = "X", gzip_level = 9)
+
+```
+

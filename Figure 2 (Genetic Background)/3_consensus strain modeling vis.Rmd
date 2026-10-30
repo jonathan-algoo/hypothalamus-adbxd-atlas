@@ -1,0 +1,235 @@
+---
+title: "consensus proportion modeling - tri method consensus"
+output: html_document
+date: "2025-07-22"
+---
+
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+# Split the cluster assignments into a list by cell class
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+#convert animal_id to factor, to use to add metadata later 
+animal_metadata$animal_id = as.factor(animal_metadata$animal_id)
+
+```
+
+```{r}
+ancombc_results_df = readRDS("ancombc2_prop_results.rds")
+sccomp_results = readRDS("sccomp_results_strain.rds")
+voomclr_results_df = readRDS("voomclr_results_strain.rds")
+
+#threshold set at .1 in 2 of 3 methods
+FDR_CUT = 0.1
+
+norm_key       = function(x) make.names(as.character(x))
+clean_contrast = function(x) make.names(stringr::str_remove(as.character(x), "^strain"))
+
+
+sccomp_std = sccomp_results %>%
+  dplyr::filter(grepl("^strain", parameter)) %>%
+  dplyr::transmute(cell_class = class,
+                   cluster_key = norm_key(cluster),
+                   contrast = clean_contrast(parameter),
+                   estimate = c_effect, fdr = c_FDR, method = "sccomp")
+
+voomclr_std = voomclr_results_df %>%
+  dplyr::transmute(cell_class = class,
+                   cluster_key = norm_key(cluster),
+                   contrast = clean_contrast(strain),
+                   estimate = logFC, fdr = adj.P.Val, method = "voomCLR")
+
+ancombc_std = ancombc_results_df %>%
+  dplyr::transmute(cell_class = class,
+                   cluster_key = norm_key(cluster),
+                   contrast = clean_contrast(contrast),
+                   estimate = lfc, fdr = p_val_adj, method = "ancombc2")
+
+sccomp_sig = sccomp_std %>% filter(fdr < FDR_CUT)
+ancombc_sig = ancombc_std %>% filter(fdr < FDR_CUT)
+voomclr_sig = voomclr_std %>% filter(fdr < FDR_CUT)
+
+sccomp_sig = sccomp_sig %>% mutate(dir = case_when(
+  estimate > 0 ~ "up",
+  .default = "down"
+))
+
+ancombc_sig = ancombc_sig %>% mutate(dir = case_when(
+  estimate > 0 ~ "up",
+  .default = "down"
+))
+
+voomclr_sig = voomclr_sig %>% mutate(dir = case_when(
+  estimate > 0 ~ "up",
+  .default = "down"
+))
+
+
+all_sig = bind_rows(sccomp_sig, ancombc_sig, voomclr_sig)
+all_sig = all_sig %>% unite("cluster_strain_direction", cluster_key, contrast, dir,remove = FALSE)
+sig_counts = all_sig %>% count(cluster_strain_direction) 
+
+consensus_sig = sig_counts %>% filter(n >= 2)
+
+all_sig = all_sig %>% filter(cluster_strain_direction %in% consensus_sig$cluster_strain_direction)
+
+all_sig = all_sig %>% select(cluster_key, contrast) %>% distinct()
+all_sig$sig = T
+```
+
+Now plot
+```{r}
+library(patchwork)
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+
+# --- 1. fill = sccomp effect; star = consensus criterion ---
+plot_data <- sccomp_results %>%
+  dplyr::filter(grepl("^strain", parameter)) %>%
+  dplyr::transmute(
+    cell_class  = class,
+    cluster     = as.character(cluster),
+    c_effect,
+    strain      = gsub("^strain", "", parameter),   
+    contrast    = clean_contrast(parameter),        
+    cluster_key = norm_key(cluster)
+  ) %>%
+  dplyr::left_join(
+    all_sig,
+    by = c("contrast", "cluster_key")
+  ) %>%
+  dplyr::mutate(is_significant = !is.na(sig))
+
+# --- 2. relabel clusters, order classes with neuronal last ---
+plot_data_heatmap <- plot_data %>%
+  dplyr::mutate(cluster = dplyr::if_else(cell_class == "neuronal",
+                                         sub("^cluster_neuronal-", "", cluster),
+                                         sub("^cluster_", "", cluster))) %>%
+  dplyr::mutate(
+    official = df_internal_and_official_name$official_name[
+      match(cluster, as.character(df_internal_and_official_name$numeric_id))],
+    cluster  = dplyr::if_else(cell_class == "neuronal",
+                              dplyr::coalesce(official, cluster), cluster)
+  ) %>%
+  dplyr::select(-official) %>%
+  dplyr::mutate(cell_class = factor(cell_class, levels = c(
+    sort(setdiff(unique(.$cell_class), "neuronal")), "neuronal"))) %>%
+  dplyr::arrange(cell_class, cluster) %>%
+  dplyr::mutate(cluster = factor(cluster, levels = unique(.$cluster)))
+
+plot_data_non_neuronal <- plot_data_heatmap %>%
+  dplyr::filter(cell_class != "neuronal") %>% droplevels()
+plot_data_neuronal <- plot_data_heatmap %>%
+  dplyr::filter(cell_class == "neuronal") %>% droplevels()
+
+max_abs_effect <- max(abs(plot_data_heatmap$c_effect), na.rm = TRUE)
+color_limits   <- c(-max_abs_effect, max_abs_effect)
+```
+
+
+```{r}
+# --- 3. one builder, two panels ---
+make_panel <- function(df, title, ylab) {
+  ggplot(df, aes(x = strain, y = cluster, fill = c_effect)) +
+    geom_tile(color = "grey50", linewidth = 0.4) +
+    geom_text(data = ~ dplyr::filter(.x, is_significant),
+              label = "*", color = "black", size = 6, vjust = 0.75) +
+    facet_grid(cell_class ~ ., scales = "free_y", space = "free_y", switch = "y") +
+    scale_fill_gradient2(name = "Logit-fold change (sccomp)",
+                         low = "#0571b0", mid = "white", high = "#ca0020",
+                         midpoint = 0, limits = color_limits) +
+    labs(title = title, y = ylab, x = "Strain (vs. B6)") +
+    theme_classic(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10, face = "bold"),
+      axis.text.y = element_text(size = 9),
+      strip.text.y.left = element_text(face = "bold", angle = 0),
+      panel.spacing.y = unit(0.5, "lines"),
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.title.position = "plot"
+    )
+}
+
+combined_plot <-
+  (make_panel(plot_data_non_neuronal, "Non-Neuronal Clusters", "Cluster") +
+   make_panel(plot_data_neuronal,     "Neuronal Clusters",     "")) +
+  plot_layout(guides = "collect") +
+  plot_annotation(caption = paste0(
+    "* = consistent direction and FDR < ", FDR_CUT,
+    " in \u2265 2 of 3 methods (sccomp, voomCLR, ANCOM-BC2). Fill shows the sccomp estimate.")) &
+  theme(legend.position = "bottom")
+
+ggsave("consensus_strain_comparisons_vs_b6.pdf", combined_plot, width = 18, height = 20)
+```

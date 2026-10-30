@@ -1,0 +1,109 @@
+---
+title: "supp figure - qc metrics by cell class"
+output: html_document
+date: "2026-01-05"
+---
+
+Last ran Feb 25, 2026
+
+Load libraries
+```{r setup}
+library(BPCells)
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+```
+
+
+```{r}
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+neuronal_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+non_neuronal_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+assignments = c(neuronal_assignments, non_neuronal_assignments)
+all_ge = all_ge[,names(assignments)]
+
+
+
+```
+
+
+
+
+```{r}
+cell_metadata = data.frame(cell_id = names(assignments), cluster = assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+cell_metadata =cell_metadata %>% mutate(cluster = case_when(
+  cluster %in% df_internal_and_official_name$numeric_id ~ df_internal_and_official_name$official_name[match(cluster,df_internal_and_official_name$numeric_id)],#neuronal
+  .default = cluster #non-neuronal
+)) 
+cell_metadata = cell_metadata %>% mutate(cell_class = case_when(
+  cluster %in% df_internal_and_official_name$official_name ~ "neuronal",
+  grepl("vascular-endothelial", cluster) ~ "endothelial",
+  grepl("vascular-pericytes", cluster) ~ "pericytes",
+  grepl("vascular-smc", cluster) ~ "smooth muscle",
+  .default = sub("[-_].*", "", cluster)
+))
+
+#get median UMIs and genes detected total
+nUMIs_ge = colSums(all_ge)
+median_umis_ge = median(nUMIs_ge) #8997
+nGenesDetected_ge = colSums(all_ge > 0)
+median_umis_all = median(nGenesDetected_ge)
+
+cell_metadata$nUMIs = nUMIs_ge[cell_metadata$cell_id]
+cell_metadata$nGenesDetected = nGenesDetected_ge[cell_metadata$cell_id]
+```
+
+
+```{r}
+cell_metadata$cell_class = str_to_title(cell_metadata$cell_class)
+
+cell_metadata = cell_metadata %>% mutate(
+  cell_class = case_when(
+     cell_class == "Bam" ~ "BAM",
+     cell_class == "Smooth Muscle" ~ "SMC",
+     cell_class == "Smc" ~ "SMC",
+     cell_class == "Vlmc" ~ "VLMC",
+     cell_class == "Opc" ~ "OPC",
+     cell_class == "Tcells" ~ "T-Cells",
+    .default = cell_class
+  )
+)
+#plot boxplot of nUMIs and nGenesDetected by Cell class
+p_umis = ggplot(cell_metadata, aes(x=cell_class, y=log10(nUMIs))) +
+  geom_boxplot(outliers = F) +
+  theme_bw() +
+  xlab("Cell Class") +
+  ylab("Log10 number of UMIs") +
+  ggtitle("UMIs per Cell Class") + theme_classic(base_family = "Helvetica",base_size = 20) +
+  theme(
+    plot.title = element_text(face = "bold", size = 30),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+  )
+
+
+
+p_genes_detected = ggplot(cell_metadata, aes(x=cell_class, y=nGenesDetected)) +
+  geom_boxplot(outliers = F) +
+  theme_bw() +
+  xlab("Cell Class") +
+  ylab("Number of Genes Detected") +
+  ggtitle("Genes Detected per Cell Class") +
+  theme_classic(base_family = "Helvetica",base_size = 20) +
+  theme(
+    plot.title = element_text(face = "bold", size = 30),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+  )
+
+
+library(patchwork)
+qc_plot_umis_gd = p_umis / p_genes_detected
+
+ggsave("supp fig nUMIs and genes detected per class.pdf", qc_plot_umis_gd,width = 20,height = 20)
+```
+

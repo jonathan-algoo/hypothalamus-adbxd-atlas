@@ -1,0 +1,347 @@
+---
+title: "cluster proportions consensus"
+output: html_document
+date: "2026-08-31"
+---
+
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(patchwork)
+set.seed(1)
+```
+
+
+```{r}
+combined_results = readRDS("../shared objs and code/combined_compositional_results_all_methods.rds")
+#identify results significant in 2 / 3 methods @ FDR of .1
+significant_results_at_least_2 = combined_results %>%
+  filter(adj_p_val < 0.1) %>%
+  group_by(cluster, cell_class, contrast, direction) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+
+#get adj p values by method for each cluster, cell_class, contrast, direction in one row
+significant_results_wide = significant_results_at_least_2 %>%
+  select(-raw_p_val) %>%
+  pivot_wider(names_from = method, values_from = adj_p_val, names_prefix = "adj_p_val_") 
+
+significant_results_wide_amyloid = significant_results_wide %>%
+  filter(grepl("amyloid", contrast))
+
+microglia_sig_results = significant_results_wide_amyloid %>% filter(cell_class == "microglia")
+```
+
+Visualize abundance via proportion plot
+
+Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments.
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+# Split the cluster assignments into a list by cell class
+cluster_list <- split(cell_metadata, cell_metadata$cell_class)
+
+#convert animal_id to factor, to use to add metadata later 
+animal_metadata$animal_id = as.factor(animal_metadata$animal_id)
+
+
+#change young to 6 and old to 14 in age
+animal_metadata$age = case_when(
+  animal_metadata$age == "young" ~ "6",
+  animal_metadata$age == "old" ~ "14",
+  .default = NA
+)
+
+cluster_counts_per_class = vector(mode = "list", length = length(cluster_list))
+names(cluster_counts_per_class) = names(cluster_list)
+
+for(i in seq_along(cluster_list)) {
+  cur_class = names(cluster_list)[i]
+  #initialize df to count cluster counts
+  cluster_counts = cluster_list[[cur_class]] %>% ungroup()
+  #convert columns to factor
+  cluster_counts$cluster = as.factor(cluster_counts$cluster)
+  cluster_counts$animal_id = as.factor(cluster_counts$animal_id)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  cluster_counts = cluster_counts %>% ungroup() %>% group_by(cluster, animal_id, .drop = F) %>% dplyr::count(name = "count")
+  #add other columns back
+  cluster_counts = cluster_counts %>% left_join(animal_metadata, by = "animal_id")
+  #convert columns to factor
+  cluster_counts$genotype = as.factor(cluster_counts$genotype)
+  cluster_counts$strain = as.factor(cluster_counts$strain)
+  cluster_counts$sex = as.factor(cluster_counts$sex)
+  cluster_counts$age = as.factor(cluster_counts$age)
+  #add "animal_" and "cluster_" to relevant columns to avoid problems with sccomp
+  #cluster_counts$animal_id = paste0("animal_", cluster_counts$animal_id) %>% as.factor()
+  #cluster_counts$cluster = paste0("cluster_", cluster_counts$cluster) %>% as.factor()
+  #relevel to get the following as reference: genotype - Ntg, age - 6, sex - M
+  cluster_counts$genotype = relevel(cluster_counts$genotype, ref = "Ntg")
+  cluster_counts$age = relevel(cluster_counts$age, ref = "6")
+  cluster_counts$sex = relevel(cluster_counts$sex, ref = "Male")
+  cluster_counts$strain = relevel(cluster_counts$strain, ref = "B6")
+  #ungroup the data to avoid problems with sccomp
+  cluster_counts = cluster_counts %>% ungroup()
+  cluster_counts_per_class[[cur_class]] = cluster_counts
+}
+
+
+```
+
+
+
+
+
+
+
+
+Get relative microglia cluster proportions per animal
+```{r}
+
+micro_counts = cluster_counts_per_class$microglia
+microglia_proportions = micro_counts %>% ungroup %>% group_by(animal_id, .drop = F) %>% 
+  mutate(total_cells = sum(count)) %>% # Total cells *within the class*
+  mutate(proportion = count/total_cells)
+```
+
+Plot Old TG Male and Old Ntg Male microglia−4 and microglia-5
+```{r}
+library(ggsignif)
+
+#bar 1 coords x: .75 - 1.75 @ y = .3
+#bar 2 coords x: 1.25 - 2.25 @ y = .4
+microglia_proportions$sex_age_genotype = factor(interaction(microglia_proportions$sex,microglia_proportions$age,microglia_proportions$genotype, sep = "/"), levels = c("Male/6/Ntg", "Male/6/5XFAD","Male/14/Ntg", "Male/14/5XFAD","Female/6/Ntg", "Female/6/5XFAD","Female/14/Ntg", "Female/14/5XFAD"))
+
+# Function to extract FDR-corrected p-value and format annotation
+get_pvalue_annotation <- function(comparison, cluster_name, results_df) {
+  # Create a sorted key for the comparison (handles both orders)
+  comp_key <- paste(sort(comparison), collapse = "_")
+  
+  # Map comparisons to contrasts using sorted keys
+  contrast_lookup <- list(
+    "Male/6/5XFAD_Male/6/Ntg" = "early_amyloid_male",
+    "Male/14/5XFAD_Male/14/Ntg" = "prolonged_amyloid_male",
+    "Female/6/5XFAD_Female/6/Ntg" = "early_amyloid_female",
+    "Female/14/5XFAD_Female/14/Ntg" = "prolonged_amyloid_female",
+    "Male/14/5XFAD_Male/6/5XFAD" = "late_vs_early_amyloid_male",
+    "Female/14/5XFAD_Female/6/5XFAD" = "late_vs_early_amyloid_female",
+    "Female/6/5XFAD_Male/6/5XFAD" = "effect_of_sex_young_5x",
+    "Female/14/5XFAD_Male/14/5XFAD" = "effect_of_sex_old_5x"
+  )
+  
+  contrast_name <- contrast_lookup[[comp_key]]
+  
+  if (is.null(contrast_name)) {
+    # Debug: uncomment to see which comparison failed to match
+    # cat("Warning: No contrast found for comparison:", paste(comparison, collapse=" vs "), "| Key:", comp_key, "\n")
+    return("NS")
+  }
+  
+
+  # Extract p-value from sig results df (if not there, not sig so return "")
+  result_row <- results_df %>%
+    filter(cluster == cluster_name, contrast == contrast_name)
+  
+  if (nrow(result_row) == 0) {
+    return("")
+  }
+  
+  # Try different possible column names for FDR-corrected p-value
+  # Common sccomp column names: c_FDR, p_adjusted, p.adjusted, FDR, padj
+  p_adj_sccomp = result_row[["adj_p_val_sccomp"]]
+  
+  # Format annotation
+  if (p_adj_sccomp < 0.001) {
+    return("***")
+  } else if (p_adj_sccomp < 0.01) {
+    return("**")
+  } else if (p_adj_sccomp < 0.05) {
+    return("*")
+  } else {
+    #set to "" (no specification)
+    return("")
+  }
+}
+
+# Define comparisons for both plots
+comparisons_list <- list(
+  c("Male/6/Ntg", "Male/6/5XFAD"),
+  c("Male/14/Ntg", "Male/14/5XFAD"),
+  c("Female/6/Ntg", "Female/6/5XFAD"),
+  c("Female/14/Ntg", "Female/14/5XFAD")
+)
+
+# Get annotations for microglia-4
+annotations_micro4 <- sapply(comparisons_list, function(comp) {
+  get_pvalue_annotation(comp, "microglia-4", microglia_sig_results)
+})
+
+# Get annotations for microglia-5
+annotations_micro5 <- sapply(comparisons_list, function(comp) {
+  get_pvalue_annotation(comp, "microglia-5", microglia_sig_results)
+})
+```
+
+```{r}
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+micro_4_plot = ggplot(microglia_proportions %>% filter(cluster == "microglia-4"), aes(x = sex_age_genotype, y = proportion)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(aes(color = strain),height = 0, width = .2, size = 6) +
+  labs(
+    x = "Sex/Age/Genotype",
+    y = "Stage 2 DAM Proportion"
+  ) +
+  scale_color_manual(values = color_mapping_strains_to_colors) +
+  ylim(c(0,.7)) + theme_classic(base_family = "Helvetica",base_size = 25) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 35,hjust = .5),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold", color = "black", angle = 45, hjust = 1),
+    axis.text.y = element_text(face = "bold", color = "black"),
+    axis.title.x = element_text(face = "bold", color = "black", size = 25),
+    axis.title.y = element_text(face = "bold", color = "black", size = 25),
+    strip.text = element_text(face = "bold"), # For facet labels (Young/Old)
+    legend.position = "none"
+  ) + scale_fill_brewer() +
+geom_signif(annotations = annotations_micro4,
+              comparisons = comparisons_list,
+              step_increase = 0,
+            y_position = c(.65, .45,.45,.45),
+            textsize = 12,
+            family = "Helvetica")
+#eac
+
+ggsave("micro_4_plot.pdf", micro_4_plot, width = 9, height = 10) # Adjusted size
+
+
+
+#Micro 5 plot
+micro_5_plot = ggplot(microglia_proportions %>% filter(cluster == "microglia-5"), aes(x = sex_age_genotype, y = proportion)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(aes(color = strain),height = 0, width = .2, size = 6) +
+  labs(
+    x = "Sex/Age/Genotype",
+    y = "Stage 1 DAM Proportion"
+  ) +
+  scale_color_manual(values = color_mapping_strains_to_colors) +
+  ylim(c(0,.2)) + theme_classic(base_family = "Helvetica",base_size = 35) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 35,hjust = .5),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold", color = "black", angle = 45, hjust = 1),
+    axis.text.y = element_text(face = "bold", color = "black"),
+    axis.title.x = element_text(face = "bold", color = "black", size = 25),
+    axis.title.y = element_text(face = "bold", color = "black", size = 25),
+    strip.text = element_text(face = "bold"), # For facet labels (Young/Old)
+    legend.position = "none"
+  ) + scale_fill_brewer() +
+geom_signif(annotations = annotations_micro5,
+              comparisons = comparisons_list,
+              step_increase = 0,
+            y_position = c(.08, .1,.1,.18),
+            textsize = 12,
+            family = "Helvetica")
+
+ggsave("micro_5_plot.pdf", micro_5_plot, width = 9, height = 10) # Adjusted size
+
+```
+
+
+```{r}
+library(patchwork)
+
+micro_5_top <- micro_5_plot +
+  labs(x = NULL) +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank()
+  )
+combined_plot = (micro_5_top & theme(axis.title.y = element_text(face = "bold", color = "black", size = 40),axis.text.y = element_text(face = "bold", color = "black", size = 35)))/(micro_4_plot &
+  theme(
+    axis.text.x = element_text(face = "bold", color = "black", angle = 45, hjust = 1, size = 35),
+    axis.text.y = element_text(face = "bold", color = "black", size = 35),
+    axis.title.x = element_text(face = "bold", color = "black", size = 40),
+    axis.title.y = element_text(face = "bold", color = "black", size = 40)))
+ggsave("micro_4_5_combined.pdf", combined_plot, width = 17, height = 25)
+```
+ 
+ 

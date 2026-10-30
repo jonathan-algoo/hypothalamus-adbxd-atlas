@@ -1,0 +1,104 @@
+---
+title: "continuous mixed models dreamlet"
+output: html_document
+date: "2026-09-14"
+---
+
+```{r}
+set.seed(1) #added 9/14
+library(dreamlet)
+library(tidyverse)
+library(zellkonverter)
+library(SingleCellExperiment)
+library(BiocParallel)
+
+# Set up parallel processing with 8 cores
+bpparam <- MulticoreParam(workers = 8)
+mm_formula = "~ age_genotype + age_genotype:sex + 0 + (1|strain)" %>% as.formula()
+
+#list of model contrasts
+#prolonged exposure to amyloid contrast
+prolonged_amyloid_contrast_m = "age_genotypeold_5XFAD - age_genotypeold_Ntg"
+early_amyloid_contrast_m = "age_genotypeyoung_5XFAD - age_genotypeyoung_Ntg"
+aging_contrast_m = "age_genotypeold_Ntg - age_genotypeyoung_Ntg"
+
+prolonged_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`)"
+early_amyloid_contrast_f = "(age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
+aging_contrast_f = "(age_genotypeold_Ntg +`age_genotypeold_Ntg:sexFemale`)  - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
+
+
+late_vs_early_amyloid_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD)"
+late_vs_early_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)"
+
+
+effect_of_sex_young_ntg = "`age_genotypeyoung_Ntg:sexFemale`"
+effect_of_sex_young_5x = "`age_genotypeyoung_5XFAD:sexFemale`"
+effect_of_sex_old_ntg = "`age_genotypeold_Ntg:sexFemale`"
+effect_of_sex_old_5x = "`age_genotypeold_5XFAD:sexFemale`"
+
+
+
+
+
+#contrasts in dreamlet style 
+custom_contrasts = c(prolonged_amyloid_contrast_m = "age_genotypeold_5XFAD - age_genotypeold_Ntg", early_amyloid_contrast_m = "age_genotypeyoung_5XFAD - age_genotypeyoung_Ntg", aging_contrast_m = "age_genotypeold_Ntg - age_genotypeyoung_Ntg", prolonged_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`)", early_amyloid_contrast_f = "(age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)", aging_contrast_f = "(age_genotypeold_Ntg +`age_genotypeold_Ntg:sexFemale`)  - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)",late_vs_early_amyloid_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD)",
+late_vs_early_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)"
+)
+```
+
+Male analysis
+```{r}
+h5ad_file = "./dreamlet-anndata.h5ad"
+# Create SingleCellExperiment object that points to on-disk H5AD file
+sce <- readH5AD(h5ad_file, use_hdf5 = TRUE)
+
+pb <- aggregateToPseudoBulk(sce,
+  assay = "X",
+  cluster_id = "cluster",
+  sample_id = "animal_id",
+  BPPARAM = bpparam
+)
+ 
+
+#keep default params
+processed_assay = processAssays(pb,
+                                     mm_formula, 
+                                     BPPARAM = bpparam)
+
+qs2::qs_save(processed_assay, "../intermediate_dreamlet_obj.qs2")
+saveRDS(processed_assay, "../intermediate_dreamlet_obj.rds")
+
+# Differential expression analysis within each assay
+
+processed_de_results <- dreamlet(processed_assay, mm_formula, BPPARAM = bpparam, contrasts = custom_contrasts)
+qs2::qs_save(processed_de_results, "../processed_dreamlet.qs2")
+```
+
+
+extract and process the data (extract contrasts and perform BH correction)
+```{r}
+processed_de_results = qs2::qs_read("../processed_dreamlet.qs2")
+#multi term coefficients + single terms
+coef_names_to_extract = names(custom_contrasts) %>% c("age_genotypeyoung_Ntg:sexFemale", "age_genotypeyoung_5XFAD:sexFemale","age_genotypeold_Ntg:sexFemale","age_genotypeold_5XFAD:sexFemale")
+names(coef_names_to_extract) = c(names(custom_contrasts),"effect_of_sex_young_ntg","effect_of_sex_young_5x","effect_of_sex_old_ntg","effect_of_sex_old_5x")
+
+results_list = list()
+for(i in seq_along(coef_names_to_extract)){
+  coef_name = coef_names_to_extract[i]
+  de_results_contrast = topTable(processed_de_results, coef = coef_name, number = Inf, adjust.method = "none") %>% as.data.frame()
+  de_results_contrast$comparison = names(coef_names_to_extract)[i]
+  results_list[[i]] = de_results_contrast
+}
+de_results = bind_rows(results_list)
+de_results = de_results %>% rename("cluster" = "assay")
+de_results = de_results %>% rename("gene" = "ID")
+
+#BH correction within each cluster/contrast
+de_results = de_results %>% ungroup %>% 
+  group_by(cluster, comparison) %>%
+  mutate(adj.P.Val = p.adjust(P.Value, method = "BH"))
+
+qs2::qs_save(de_results, "../dreamlet_de_results_all_contrasts.qs2")
+
+```
+

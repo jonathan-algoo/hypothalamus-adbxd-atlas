@@ -1,0 +1,254 @@
+---
+title: "marker genes"
+output: html_document
+date: "2025-12-31"
+---
+
+```{r}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+genes_to_remove <- rownames(all_ge)[grepl("^Gm|Rik", rownames(all_ge))]
+
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+all_classes = cell_metadata$cell_class %>% unique
+all_classes = all_classes[all_classes != "neuronal"]
+
+
+```
+
+```{r}
+cur_meta = cell_metadata %>% filter(cell_class == "microglia")
+cur_ge = all_ge[,cur_meta$cell_id]
+cur_ge_ln <- multiply_cols(cur_ge, 1/Matrix::colSums(cur_ge))
+cur_ge_ln <- log1p(cur_ge_ln * 1e6) # Log transform
+
+#find markers using marker_features
+cur_markers = marker_features(cur_ge_ln, cur_meta$cluster)
+cur_markers$l2fc = (cur_markers$foreground_mean - cur_markers$background_mean)/log(2)
+```
+
+mic7 - Insyn2b, Ccdc85a
+mic6 - ND4, Ptgds
+mic4/5 - Myo1e, Etl4 
+mic3 - P2ry13, Sting1, C1qa
+mic2- Ifit3,Ifitm2,Isg15 
+mic1-Pcdh9,Nrxn1
+```{r}
+
+subtype_specific_genes = c("Insyn2b", "Ccdc85a", "ND4", "Ptgds", "Myo1e", "Etl4", "P2ry13", "Sting1", "C1qa", "Ifit3", "Ifitm3", "Pcdh9","Nrxn1")
+selected_genes = c("P2ry12", "Tmem119", "Cx3cr1","Trem2", "Apoe","Xist","Tsix", "Uty") %>% unique
+selected_genes = c(subtype_specific_genes, selected_genes) %>% unique
+
+percent_pseudobulk = all_ge[selected_genes,cur_meta$cell_id] > 0
+percent_pseudobulk = percent_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+ln_pseudobulk = cur_ge_ln[selected_genes,]
+ln_pseudobulk = ln_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+dotplot_df = data.frame()
+for(gene in selected_genes){
+  for(cluster in unique(cur_meta$cluster)){
+    avg_exp = ln_pseudobulk[gene, cluster]
+    pct_exp = percent_pseudobulk[gene, cluster] * 100
+    dotplot_df = rbind(dotplot_df, data.frame(gene = gene, cluster = cluster, avg_exp = avg_exp, pct_exp = pct_exp))
+  }
+}
+
+
+```
+
+
+```{r}
+# Define specific ordering for Clusters and Genes as requested
+cluster_order <- c("microglia-1", "microglia-6", "microglia-7", "microglia-3", 
+                   "microglia-4", "microglia-5", 
+                   "microglia-2")
+
+gene_order <- selected_genes
+
+# Apply factors to dataframe
+dotplot_df$cluster <- factor(dotplot_df$cluster, levels = rev(cluster_order)) # rev puts cluster 1 at top of Y-axis
+dotplot_df$gene <- factor(dotplot_df$gene, levels = gene_order)
+
+#zscore by gene
+dotplot_df <- dotplot_df %>%
+  group_by(gene) %>%
+  mutate(avg_exp = scale(avg_exp, center = TRUE, scale = TRUE)[, 1]) %>%
+  ungroup()
+
+
+
+
+```
+
+
+```{r}
+main_plot_genes = selected_genes
+
+
+#title case the cluster names for plotting
+dotplot_df$cluster = str_to_title(dotplot_df$cluster)
+
+dotplot_df_with_new_cluster_names = dotplot_df %>% mutate(cluster = case_when(
+  cluster == "Microglia-1" ~ "Microglia-1 (Homeostatic)",
+  cluster == "Microglia-2" ~ "Microglia-2 (Interferon Associated)",
+  cluster == "Microglia-3" ~ "Microglia-3 (Tsix/Xist)",
+  cluster == "Microglia-4" ~ "Microglia-4 (Stage 2 DAMs)",
+  cluster == "Microglia-5" ~ "Microglia-5 (Stage 1 DAMs)",
+  cluster == "Microglia-6" ~ "Microglia-6 (Homeostatic)",
+  cluster == "Microglia-7" ~ "Microglia-7 (Tsix/Xist)",
+  .default = cluster
+))
+
+micro_marker_plot = ggplot(dotplot_df_with_new_cluster_names %>% filter(gene %in% main_plot_genes), aes(x = gene, y = cluster, fill = avg_exp, size = pct_exp)) + 
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(max_size = 25,name = "Percent\nExpressed") +
+  scale_fill_gradient2(mid = "white",high = "#D55E00",low = "#0072B2",name = "Scaled\nExpression") +
+  ggtitle("Microglial Cluster Markers") +
+  theme_classic(base_size = 20) +  
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  theme(
+    plot.title = element_text(face = "bold", size = 70,hjust = .5),
+    axis.title.x = element_text(face = "bold", size = 50),
+    axis.title.y = element_text(face = "bold", size = 50),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold"),
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(face = "bold",size = 10),
+    legend.position = "right",
+    legend.key.size = unit(2, "cm")
+  ) +
+labs(x = "Gene", y = "Microglial Cluster")
+ggsave("microglia_marker_dotplot.pdf", micro_marker_plot, width = 22, height = 10)
+```
+
+
+```{r}
+
+dam_subcluster_genes =  c("Lpl", "Axl", "Itgax", "Spp1", "Cd9", "Ccl6", "Csf1")
+
+percent_pseudobulk = all_ge[dam_subcluster_genes,cur_meta$cell_id] > 0
+percent_pseudobulk = percent_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+ln_pseudobulk = cur_ge_ln[dam_subcluster_genes,]
+ln_pseudobulk = ln_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+dotplot_df = data.frame()
+for(gene in dam_subcluster_genes){
+  for(cluster in unique(cur_meta$cluster)){
+    avg_exp = ln_pseudobulk[gene, cluster]
+    pct_exp = percent_pseudobulk[gene, cluster] * 100
+    dotplot_df = rbind(dotplot_df, data.frame(gene = gene, cluster = cluster, avg_exp = avg_exp, pct_exp = pct_exp))
+  }
+}
+
+
+# Define specific ordering for Clusters and Genes as requested
+cluster_order <- c("microglia-1", "microglia-6", "microglia-7", "microglia-3", 
+                   "microglia-4", "microglia-5", 
+                   "microglia-2")
+
+gene_order <- dam_subcluster_genes
+
+# Apply factors to dataframe
+dotplot_df$cluster <- factor(dotplot_df$cluster, levels = rev(cluster_order)) # rev puts cluster 1 at top of Y-axis
+dotplot_df$gene <- factor(dotplot_df$gene, levels = gene_order)
+
+#zscore by gene
+dotplot_df <- dotplot_df %>%
+  group_by(gene) %>%
+  mutate(avg_exp = scale(avg_exp, center = TRUE, scale = TRUE)[, 1]) %>%
+  ungroup()
+
+
+dotplot_df$cluster = factor(dotplot_df$cluster, levels = rev(c("microglia-5","microglia-4","microglia-3")))
+dam_subcluster_genes_plot = ggplot(dotplot_df %>% filter(cluster %in% c("microglia-4","microglia-5","microglia-3")), aes(x = gene, y = cluster)) +
+  geom_point(aes(size = pct_exp, fill = avg_exp), shape = 21, color = "black") +
+  scale_fill_viridis_c(name = "Scaled\nLog-Normalized\nExpression") +
+  scale_size(range = c(1, 8), name = "% Expressed") +
+  theme_classic(base_family = "Helvetica",base_size = 14) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold", color = "black"),
+    legend.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1.2, face = "bold"),
+    axis.text.y = element_text(),
+    panel.grid.major = element_line(color = "grey90"),
+    legend.position = "right"
+  ) +
+  labs(x = "", y = "", title = "DAM Subtype Markers Distinguish Stage 1 vs Stage 2")
+
+ggsave("microglia_dam_subcluster_marker_dotplot.pdf", dam_subcluster_genes_plot, width = 10, height = 4)
+
+
+```
+

@@ -1,0 +1,55 @@
+---
+title: aggregate gene expression and percent exp for each neuronal and glial
+  cluster
+output: html_document
+date: "2026-04-12"
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+
+neuron_assignments = readRDS(file = "./neuronal_number_ids_cluster_assignments.rds")
+df_internal_and_official_name = read_csv("./internal_to_official_name_conversions_neuronal.csv")
+neuron_names = names(neuron_assignments)
+neuron_assignments = df_internal_and_official_name$official_name[match(neuron_assignments, df_internal_and_official_name$numeric_id)]
+names(neuron_assignments) = neuron_names
+neuronal_ge = open_matrix_dir("./post_qc_decontx_counts/")
+neuronal_ge = neuronal_ge[,names(neuron_assignments)]
+cpm_norm_neuronal_ge =   multiply_cols(neuronal_ge, 1/Matrix::colSums(neuronal_ge))
+cpm_norm_neuronal_ge <- cpm_norm_neuronal_ge * 1e6 # cpm
+all_neuronal_cpm_norm = pseudobulk_matrix(cpm_norm_neuronal_ge, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+all_neuronal_percent = pseudobulk_matrix(neuronal_ge > 0, cell_groups = neuron_assignments, method = "mean", threads = 10L)
+
+saveRDS(all_neuronal_percent, file = "aggregate_percent_neuronal.rds")
+saveRDS(all_neuronal_cpm_norm, file = "aggregate_cpm_norm_neuronal.rds")
+```
+
+```{r}
+glia_assignments = readRDS("./non_neuronal_assignments.rds")
+glial_ge = open_matrix_dir("./post_qc_decontx_counts/")
+glial_ge = glial_ge[,names(glia_assignments)]
+cpm_norm_glial_ge =   multiply_cols(glial_ge, 1/Matrix::colSums(glial_ge))
+cpm_norm_glial_ge <- cpm_norm_glial_ge * 1e6 # cpm
+all_glial_cpm_norm = pseudobulk_matrix(cpm_norm_glial_ge, cell_groups = glia_assignments, method = "mean", threads = 10L)
+all_glial_percent = pseudobulk_matrix(glial_ge > 0, cell_groups = glia_assignments, method = "mean", threads = 10L)
+
+
+```
+
+```{r}
+#save aggregate
+full_ge_cpm_norm = cbind(all_neuronal_cpm_norm, all_glial_cpm_norm)
+
+full_ge_percent = cbind(all_neuronal_percent, all_glial_percent)
+
+full_ge_cpm_norm = full_ge_cpm_norm %>% as.data.frame() %>% rownames_to_column("gene") 
+
+full_ge_percent = full_ge_percent %>% as.data.frame() %>% rownames_to_column("gene")
+
+#save
+saveRDS(full_ge_cpm_norm, file = "aggregate_ge_cpm_norm_by_cluster_neuronal_and_non_neuronal.rds")
+saveRDS(full_ge_percent, file = "aggregate_ge_percent_by_cluster_neuronal_and_non_neuronal.rds")
+```

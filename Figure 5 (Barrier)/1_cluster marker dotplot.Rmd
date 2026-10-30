@@ -1,0 +1,251 @@
+---
+title: "cluster marker dotplot"
+output: html_document
+date: "9/22/26"
+---
+
+```{r}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+genes_to_remove <- rownames(all_ge)[grepl("^Gm|Rik", rownames(all_ge))]
+
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+cluster_assignments = non_neuronal_cluster_assignments
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+```
+
+Cluster marker dotplots 
+```{r}
+library(BPCells)
+library(tidyverse)
+library(ggtext)
+# ── Helper function ──────────────────────────────────────────────────────────
+#
+# Builds a dot-plot dataframe and returns a ggplot object for one cell class.
+#
+# Arguments:
+#   cell_metadata  – data.frame with columns cell_id, cluster, cell_class, …
+#   all_ge         – BPCells matrix (genes × cells)
+#   class_name     – character, value in cell_metadata$cell_class to subset
+#   selected_genes – character vector of genes to plot (x-axis order)
+#   cluster_rename – named character vector  old_name = "new label"
+#   plot_title     – plot title string
+#   y_label        – y-axis label string
+
+create_marker_dotplot <- function(cell_metadata, all_ge,
+                                  class_name,
+                                  selected_genes,
+                                  cluster_rename,
+                                  plot_title,
+                                  y_label) {
+
+  # Subset to cell class
+
+  cur_meta <- cell_metadata %>% filter(cell_class == class_name)
+  cur_ge   <- all_ge[, cur_meta$cell_id]
+
+  # Normalize + log-transform
+  cur_ge_ln <- multiply_cols(cur_ge, 1 / Matrix::colSums(cur_ge))
+  cur_ge_ln <- log1p(cur_ge_ln * 1e6)
+
+  # Percent expressed (per cluster)
+  percent_pb <- (cur_ge[selected_genes,] > 0) %>%
+    pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+  # Mean log-normalised expression (per cluster)
+  ln_pb <- cur_ge_ln[selected_genes, ] %>%
+    pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+  # Assemble long-form data frame
+  dotplot_df <- data.frame()
+  for (gene in selected_genes) {
+    for (cluster in unique(cur_meta$cluster)) {
+      avg_exp <- ln_pb[gene, cluster]
+      pct_exp <- percent_pb[gene, cluster] * 100
+      dotplot_df <- rbind(dotplot_df,
+                          data.frame(gene = gene, cluster = cluster,
+                                     avg_exp = avg_exp, pct_exp = pct_exp))
+    }
+  }
+
+  # Gene factor levels → controls x-axis order
+  dotplot_df$gene <- factor(dotplot_df$gene, levels = selected_genes)
+
+  # Z-score expression per gene
+  dotplot_df <- dotplot_df %>%
+    group_by(gene) %>%
+    mutate(avg_exp = scale(avg_exp)[, 1]) %>%
+    ungroup()
+
+  dotplot_df$cluster <- str_to_title(dotplot_df$cluster)
+  
+  if (!is.null(cluster_rename)) {
+    idx <- match(dotplot_df$cluster, names(cluster_rename))
+    dotplot_df$cluster[!is.na(idx)] <- cluster_rename[idx[!is.na(idx)]]
+  }  
+  dotplot_df$cluster <- str_wrap(dotplot_df$cluster, width = 20) %>%str_replace_all("\n", "<br>")
+  # Build ggplot
+  p <- ggplot(dotplot_df,
+              aes(x = gene, y = cluster, fill = avg_exp, size = pct_exp)) +
+    geom_point(shape = 21, color = "black") +
+    scale_size_area(max_size = 15, name = "Percent\nExpressed") +
+    scale_fill_gradient2(mid = "white", high = "#D55E00", low = "#0072B2",
+                         name = "Scaled\nExpression") +
+    ggtitle(plot_title) +
+    theme_classic(base_size = 15) +
+    scale_x_discrete(guide = guide_axis(angle = 45)) +
+    theme(
+      plot.title   = element_text(face = "bold", size = 30, hjust = 0.5),
+      axis.title.x = element_text(face = "bold", size = 25),
+      axis.title.y = element_text(face = "bold", size = 25),
+      axis.text.x  = element_text(face = "bold.italic",size = 17),
+      axis.text.y  = element_markdown(face = "bold", size = 17),
+      legend.title = element_text(face = "bold"),
+      legend.text  = element_text(face = "bold", size = 20),
+      legend.position  = "right",
+      legend.key.size  = unit(0.5, "cm")
+    ) +
+    labs(x = "Gene", y = y_label)
+  return(p)
+}
+
+vlmc_genes = c("Adamtsl3","Slc4a10","Col15a1","Cecr2", "Rad51b", "Abca8a","Lepr", "Slc13a4","Slc7a14", "Cubn","Slc47a1","Col1a1","Dpp4","Ppp1r1a","Slc7a11","Lama1","Col15a1","Tcf21")%>% unique
+
+ependymal_genes <-
+  c("Gria1","Dgkb","Col6a5","Mtus2","Tsc22d1","Sulf1") %>% rev()
+
+tanycyte_genes = c("P3h2", "Ephb1","Col25a1", "Fndc3c1","Rspo3","Luzp2",
+  "Cd59a", "Slc17a8", "Crym","Frzb", "Penk","Cacna2d2",  "Adm",
+  "Col23a1", "Slc16a2", "Rax", "Lhx2", "Prdx6")
+
+vascular_genes = c("Pecam1", "Cdh5", "Cd34","Tmsb10", "Ctla2a", "Gkn3", "Mgp", "Sema3g", "Stmn2","Plvap", "Col15a1", "Exoc3l2", "Emcn", "Flt1", "Ctss","Kcnj8","Rgs5", "Myh11","Acta2","Cav1")
+
+vlmc_rename <- c(
+  "Vlmc-1" = "VLMC-1 (*Adamtsl3*/*Slc4a10* Dural Border Cells)",
+  "Vlmc-2" = "VLMC-2 (*Col15a1*/*Cecr2*)",
+  "Vlmc-3" = "VLMC-3 (*Rad51b*/*Abca8a*)",
+  "Vlmc-4" = "VLMC-4 (*Lepr*/*Slc13a4*)",
+  "Vlmc-5" = "VLMC-5 (*Slc7a14*/*Cubn* Arachnoid Barrier Cells)"
+)
+
+vlmc_plot <- create_marker_dotplot(
+  cell_metadata  = cell_metadata,
+  all_ge         = all_ge,
+  class_name     = "VLMC",
+  selected_genes = vlmc_genes,
+  cluster_rename = vlmc_rename,
+  plot_title     = "VLMC Cluster Markers",
+  y_label        = "VLMC Cluster"
+)
+
+ependymal_rename <- c(
+  "Ependymal-1" = "Ependymal-1 (*Sulf1*/*Tsc22d1*)",  
+  "Ependymal-2" = "Ependymal-2 (*Mtus2*/*Col6a5*)",      
+  "Ependymal-3" = "Ependymal-3 (*Dgkb*/*Gria1*)"  
+)
+
+
+ependymal_plot <- create_marker_dotplot(
+  cell_metadata  = cell_metadata,
+  all_ge         = all_ge,
+  class_name     = "ependymal",
+  selected_genes = ependymal_genes,
+  cluster_rename = ependymal_rename,
+  plot_title     = "Ependymal Marker Gene Expression",
+  y_label        = "Ependymal Cluster"
+)
+
+
+tanycyte_rename <- c(
+  "Tanycyte-1" = "Tanycyte-1 (*P3h2*/*Ephb1*)",
+  "Tanycyte-2" = "Tanycyte-2 (*Col25a1*/*Fndc3c1* Beta-2 Tanycytes)",
+  "Tanycyte-3" = "Tanycyte-3 (*Rspo3*/*Luzp2*)"
+)
+
+
+tanycyte_plot <- create_marker_dotplot(
+  cell_metadata  = cell_metadata,
+  all_ge         = all_ge,
+  class_name     = "tanycyte",
+  selected_genes = tanycyte_genes,
+  cluster_rename = tanycyte_rename,
+  plot_title     = "Tanycyte Cluster Markers",
+  y_label        = "Tanycyte Cluster")
+
+
+
+vascular_rename <- c(
+  "Vascular-Endothelial_1" = "Endothelial-1 (*Cav1*/*Ctla2a* Arteries)", 
+  "Vascular-Endothelial_2" = "Endothelial-2 (*Gkn3* Veins)",
+  "Vascular-Endothelial_3" = "Endothelial-3 (*Plvap*/*Col15a1*/*Exoc3l2* Fenestrated)",
+  "Vascular-Pericytes"     = "Pericytes (*Rgs5*/*Kcnj8*)",
+  "Vascular-Smc"           = "SMC (*Myh11*/*Acta2*)"
+)
+
+vascular_plot <- create_marker_dotplot(
+  cell_metadata  = cell_metadata,
+  all_ge         = all_ge,
+  class_name     = "vascular",
+  selected_genes = vascular_genes,
+  cluster_rename = vascular_rename,
+  plot_title     = "Vascular Marker Gene Expression",
+  y_label        = "Vascular Cluster"
+)
+
+###############################################################################
+# Composite Figure (Panels A–D)
+###############################################################################
+library(patchwork)
+
+composite <- (vlmc_plot / ependymal_plot / tanycyte_plot / vascular_plot) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "bold", size = 40))
+
+ggsave("non_neuronal_marker_dotplots_composite.pdf",
+       composite, width = 18, height = 25)
+```
+

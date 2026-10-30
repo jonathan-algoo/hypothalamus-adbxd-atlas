@@ -1,0 +1,159 @@
+---
+title: "Get microglia umap coords for visualization of clusters on umap"
+output: html_document
+date: "2025-01-25"
+---
+further microglia clustering past just homeostatic and disease-associated (get subtypes of these two)
+
+Load libraries and functions
+```{r}
+library(magrittr)
+library(BPCells)
+library(dplyr)
+library(ggplot2)
+library(scattermore)
+library(org.Mm.eg.db)
+library(dplyr)
+library(bluster)
+library(cluster)
+library(ggcorrplot)
+library(pheatmap)
+library(ggplotify)
+library(khroma)
+library(bluster)
+library(pheatmap)
+library(cluster)
+library(factoextra)
+library(tidyverse)
+set.seed(1)
+
+get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate 30 PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
+
+
+create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
+  hnsw_index <- RcppHNSW::hnsw_build(
+    X = pc_coords,
+    ef = ef_index_build_param,
+    M = M_index_build_param,
+    distance = distance_metric,
+    n_threads = n_threads
+  )
+  nn_index <- RcppHNSW::hnsw_search(
+    X = pc_coords,
+    ann = hnsw_index,
+    k = knns_returned,
+    ef = 200,
+    n_threads = n_threads
+  )
+  
+  #convert to snn index
+  
+  #add cell ids as field
+  rownames(nn_index$idx) = rownames(pc_coords)
+  rownames(nn_index$dist) = rownames(pc_coords)
+  
+  #convert to snn graph via knn_to_snn function
+  snn_graph = knn_to_snn_graph(nn_index)
+  rownames(snn_graph) = rownames(nn_index$idx)
+  colnames(snn_graph) = rownames(nn_index$idx)
+  return(snn_graph)
+}
+
+
+
+#adapted from bpcells function
+get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  #dendro stuff start
+  
+  
+  #dendro stuff end
+  leiden_communities_found %>% 
+    igraph::membership() %>%
+    as.factor()
+}
+
+
+calculate_umap_coords <- function(pcs, cluster_assignments_vector) {
+  umap_coords <- uwot::umap(pcs)
+  umap_coords = umap_coords %>% as.data.frame()
+  umap_coords = umap_coords %>% dplyr::rename("UMAP1" = "V1", "UMAP2" = "V2")
+  
+  umap_coords_plot <- umap_coords %>% 
+  mutate(across(c(UMAP1, UMAP2), round, digits = 2)) %>% 
+  rownames_to_column("cell_id")
+  
+  umap_coords_plot$cluster = cluster_assignments_vector[umap_coords_plot$cell_id]
+  
+  #Calculate cluster centers
+  cluster_centers <- umap_coords_plot %>%
+    group_by(cluster) %>%
+    summarise(UMAP1_center = mean(UMAP1), UMAP2_center = mean(UMAP2), .groups = "drop")
+  
+  #Assign alternating colors by converting cluster to factor
+  umap_coords_plot <- umap_coords_plot %>%
+    mutate(cluster = factor(cluster))
+  umap_coords_plot
+}
+
+
+
+```
+
+```{r}
+ge_mat = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+non_neuronal_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+microglia_assignments = non_neuronal_assignments %>% grep("microglia", ., value = T)
+microglia_ge_mat = ge_mat[,names(microglia_assignments)]
+ge_mat_pcs = get_pcs_from_initial_dataset(microglia_ge_mat)
+umap_coords = calculate_umap_coords(ge_mat_pcs, microglia_assignments)
+
+
+saveRDS(umap_coords, "microglia_umap_coords.rds")
+cluster_centers <- umap_coords %>%
+    group_by(cluster) %>%
+    summarise(UMAP1_center = mean(UMAP1), UMAP2_center = mean(UMAP2), .groups = "drop")
+
+
+
+saveRDS(cluster_centers, "microglia_umap_cluster_centers.rds")
+
+
+
+umap_plot = ggplot(umap_coords, aes(x = UMAP1,  y = UMAP2)) +
+    geom_point(aes(fill = cluster, color = cluster), size = .5) +
+    geom_text(data = cluster_centers, aes(x = UMAP1_center, y = UMAP2_center, label = cluster), color = "black") +
+    theme_classic()
+
+ggsave("microglia_cluster_coords.pdf", umap_plot, device = "pdf", width = 10, height = 10) 
+```

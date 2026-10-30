@@ -1,0 +1,475 @@
+---
+title: "pathway analysis microglia validation"
+output: html_document
+date: "2026-08-18"
+---
+
+
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+library(harmony)
+library(dreamlet)
+library(SingleCellExperiment)
+set.seed(501)
+hypoad_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+hypoad_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+donor_metadata = readRDS("./hypoad_prepro/donor_metadata_hypoad_post_qc.rds")
+```
+
+Recluster microglia and remove PVMs/BAMs
+```{r}
+micro_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+cell_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+
+
+cell_meta = cell_meta %>% filter(celltype == "Microglia") %>% filter(is_primary_data)
+micro_ge = micro_ge[,rownames(cell_meta)]
+get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate 30 PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+pcs_micro = get_pcs_from_initial_dataset(micro_ge)
+
+#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
+harmony_micro = RunHarmony(pcs_micro,meta_data = cell_meta$batch)
+```
+
+Clustering utility functions
+```{r}
+create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
+  hnsw_index <- RcppHNSW::hnsw_build(
+    X = pc_coords,
+    ef = ef_index_build_param,
+    M = M_index_build_param,
+    distance = distance_metric,
+    n_threads = n_threads
+  )
+  nn_index <- RcppHNSW::hnsw_search(
+    X = pc_coords,
+    ann = hnsw_index,
+    k = knns_returned,
+    ef = 200,
+    n_threads = n_threads
+  )
+  
+  #convert to snn index
+  
+  #add cell ids as field
+  rownames(nn_index$idx) = rownames(pc_coords)
+  rownames(nn_index$dist) = rownames(pc_coords)
+  
+  #convert to snn graph via knn_to_snn function
+  snn_graph = knn_to_snn_graph(nn_index)
+  rownames(snn_graph) = rownames(nn_index$idx)
+  colnames(snn_graph) = rownames(nn_index$idx)
+  return(snn_graph)
+}
+
+
+
+#adapted from bpcells function
+get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  #dendro stuff start
+  
+  
+  #dendro stuff end
+  leiden_communities_found %>% 
+    igraph::membership() %>%
+    as.factor()
+}
+
+#adapted from bpcells function
+subcluster_assignments_and_modularity_score  = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  modularity_score = leiden_communities_found$quality
+  cluster_assignments = leiden_communities_found$membership
+  names(cluster_assignments) = leiden_communities_found$names
+  
+  list(modularity_score = modularity_score, new_assignments = cluster_assignments)
+}
+
+subcluster_cells_harmony = function(harmony_pcs, cur_cluster_name, modularity_threshold = .8, leiden_resolution = .1) {
+  results_list = list()
+  snn_graph = create_snn_graph_from_pcs(harmony_pcs)
+  mod_score_and_assignments = subcluster_assignments_and_modularity_score(snn_graph, resolution = leiden_resolution)
+  results_list$modularity_score = mod_score_and_assignments$modularity_score
+  num_new_clusters = length(mod_score_and_assignments$new_assignments %>% unique())
+  if (mod_score_and_assignments$modularity_score > modularity_threshold & num_new_clusters > 1) {
+      results_list$successful = T
+      results_list$new_assignments = paste0(cur_cluster_name,"-",mod_score_and_assignments$new_assignments)
+      names(results_list$new_assignments) = names(mod_score_and_assignments$new_assignments)
+      results_list$pcs = harmony_pcs
+      results_list$snn_graph = snn_graph
+  } else{
+    results_list$successful = F
+    results_list$new_assignments = NA
+  }
+  return(results_list)
+}
+
+get_lognorm_markers = function(cluster_assignments, non_norm_ge) {
+  assignments = cluster_assignments$new_assignments
+  non_norm_ge = non_norm_ge[,names(assignments)]
+  #log norm
+  non_norm_ge = multiply_cols(non_norm_ge, 1/Matrix::colSums(non_norm_ge))
+  non_norm_ge <- log1p(non_norm_ge * 1e6) # Log cpm
+  
+  #get markers
+  markers_per_clust = marker_features(mat = non_norm_ge, assignments)
+  markers_per_clust = markers_per_clust %>% mutate(l2fc = (foreground_mean - background_mean)/log(2))
+  markers_per_clust = markers_per_clust %>% mutate(cpm_expression = 100*(2^foreground_mean - 1))
+
+  markers_per_clust
+}
+
+micro_clusters = subcluster_cells_harmony(harmony_pcs = harmony_micro,cur_cluster_name = "microglia", leiden_resolution = .1)
+
+
+
+mic_markers = get_lognorm_markers(cluster_assignments = micro_clusters, non_norm_ge = micro_ge)
+```
+
+Because of randomness from clustering, may need to change this number on each run
+microglia-2 = BAMs/PVMs (F13A1/LYVE1)
+```{r}
+#remove microglia-5 (Border associated macrophages/BAMs/PVMs), and recluster
+bam_cells = micro_clusters$new_assignments[micro_clusters$new_assignments == "microglia-2"] %>% names
+mic_cells = micro_clusters$new_assignments[micro_clusters$new_assignments != "microglia-2"]
+
+cell_meta_2 = cell_meta[names(mic_cells),]
+```
+
+Perform DEG analysis on microglia modeling expression per gene ~ad + age + pmi_hours
+
+```{r}
+donor_metadata$age = scale(donor_metadata$age)
+
+rna_and_pmi_info = read_csv("./hypoad_prepro/rna and pmi donor info.csv")
+rna_and_pmi_info = rna_and_pmi_info[1:14,]
+rna_and_pmi_info$pmi_hours_format= rna_and_pmi_info$pmi_hours_format %>% as.character()
+#from stack overflow
+rna_and_pmi_info$pmi_hours_decimal = 
+sapply(strsplit(rna_and_pmi_info$pmi_hours_format,":"),
+  function(x) {
+    x <- as.numeric(x)
+    x[1]+x[2]/60
+    }
+)
+
+donor_metadata$pmi_hours = rna_and_pmi_info$pmi_hours_decimal[match(donor_metadata$donor_id, rna_and_pmi_info$cell_meta_id)]
+donor_metadata$pmi_hours = scale(donor_metadata$pmi_hours)
+#copy donor metadata from table 2 
+cell_meta_2= cell_meta_2 %>% mutate(
+  ad = case_when(condition %in% c("AD_44","AD") ~ "ad",
+                 .default = "ctl")
+)
+cell_meta_2$pmi_hours = donor_metadata$pmi_hours[match(cell_meta_2$donor_id,donor_metadata$donor_id)]
+cell_meta_2$age = donor_metadata$age[match(cell_meta_2$donor_id,donor_metadata$donor_id)]
+cell_meta_2$ad = factor(cell_meta_2$ad, levels = c("ctl","ad"))
+cell_meta_2 = droplevels(cell_meta_2)
+```
+
+
+Diff exp analysis with dreamlet
+```{r}
+
+model_formula = "~ad + age + pmi_hours" %>% as.formula
+
+ge_mat <- hypoad_ge[,cell_meta_2 %>% rownames]
+ge_mat <- ge_mat %>% as("dgCMatrix")
+sce_obj <- SingleCellExperiment(
+  assays  = list(counts = ge_mat),
+  colData = cell_meta_2
+)
+
+pb <- aggregateToPseudoBulk(
+  sce_obj,
+  assay      = "counts",
+  cluster_id = "celltype",
+  sample_id  = "donor_id"
+)
+processed_assay      <- processAssays(pb, model_formula)
+processed_de_results <- dreamlet(processed_assay, model_formula)
+ad_results <- topTable(processed_de_results, coef = "adad" , number = Inf) %>%
+  as.data.frame()
+
+
+```
+
+
+Load mouse 
+```{r}
+library(org.Mm.eg.db)
+mouse_comparisons_of_interest <- c("prolonged_amyloid_contrast_f")
+mouse_dreamlet_results <- qs2::qs_read("../shared objs and code/dreamlet_de_results_all_contrasts.qs2")
+mouse_dreamlet_results <- mouse_dreamlet_results %>%
+  filter(cluster == "microglia" &
+           comparison  == "prolonged_amyloid_contrast_f")
+
+library(gprofiler2)
+ortholog_df <- gorth(query = mouse_dreamlet_results$gene,
+                     source_organism = "mmusculus",
+                     target_organism = "hsapiens")
+mouse_dreamlet_results$human_gene <- ortholog_df$ortholog_name[match(mouse_dreamlet_results$gene, ortholog_df$input)]
+
+mouse_gene_set_sig_results = mouse_dreamlet_results %>% filter(adj.P.Val < .05) %>% mutate(sign_mouse = sign(logFC)) %>% dplyr::select(sign_mouse, human_gene)
+
+mouse_gene_set_sig_results = mouse_gene_set_sig_results %>% ungroup %>%  dplyr::select(sign_mouse, human_gene) %>% dplyr::rename("ID" = human_gene)
+
+ad_results = ad_results %>% filter(ID %in% mouse_gene_set_sig_results$ID)
+
+ad_results$mouse_sign = mouse_gene_set_sig_results$sign_mouse[match(ad_results$ID, mouse_gene_set_sig_results$ID)]
+
+ad_results = ad_results %>%
+  mutate(
+    pvalue_one_tailed = ifelse(mouse_sign == sign(logFC), P.Value / 2, 1 - P.Value / 2),
+  ) %>%
+  mutate(
+    adj_p_one_tail = p.adjust(pvalue_one_tailed, method = "BH")
+  ) %>% 
+  arrange(adj_p_one_tail)
+
+
+write_csv(ad_results, "microglia hypoad validation results.csv")
+
+
+sig_human_ad_genes = ad_results$ID
+```
+
+Plot these genes using dreamlet normalized values
+```{r}
+# voom-style normalized log2 CPM matrix for the Microglia assay
+micro_elist <- assay(processed_assay, "Microglia")
+norm_expr   <- micro_elist$E   # genes x donors
+
+# keep only genes passing the one-tailed, mouse-informed threshold
+sig_human_ad_genes <- ad_results %>%
+  filter(adj_p_one_tail < .05) %>%
+  arrange(adj_p_one_tail) %>%
+  pull(ID)
+
+genes_to_plot <- intersect(sig_human_ad_genes, rownames(norm_expr))
+
+donor_ad <- cell_meta_2 %>%
+  distinct(donor_id, ad)
+
+plot_df <- norm_expr[genes_to_plot, , drop = FALSE] %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "donor_id", values_to = "log2_cpm") %>%
+  left_join(donor_ad, by = "donor_id") %>%
+  mutate(gene = factor(gene, levels = genes_to_plot))
+
+# facet labels carrying the human effect size + one-tailed FDR
+facet_labs <- ad_results %>%
+  filter(ID %in% genes_to_plot) %>%
+  mutate(lab = ID) %>%
+  dplyr::select(ID, lab) %>%
+  deframe()
+```
+
+
+```{r}
+library(ggsignif)
+
+# --- significance annotations ---
+sig_labels <- ad_results %>%
+  filter(ID %in% genes_to_plot) %>%
+  mutate(
+    annotations = case_when(
+      adj_p_one_tail < 0.001 ~ "***",
+      adj_p_one_tail < 0.01  ~ "**",
+      adj_p_one_tail < 0.05  ~ "*",
+      TRUE                   ~ ""
+    )
+  ) %>%
+  dplyr::select(ID, annotations) %>%
+  dplyr::rename(gene = ID) %>%
+  mutate(gene = factor(gene, levels = genes_to_plot))
+
+star_df <- plot_df %>%
+  group_by(gene) %>%
+  summarise(ymax   = max(log2_cpm, na.rm = TRUE),
+            yrange = diff(range(log2_cpm, na.rm = TRUE)),
+            .groups = "drop") %>%
+  left_join(sig_labels, by = "gene") %>%
+  mutate(
+    xmin       = 1,
+    xmax       = 2,
+    y_position = ymax + yrange * 0.08
+  )
+
+color_ad_ctl = c("ctl" ="#a1bad4","ad"="#f6b2ba")
+
+# --- plot ---
+micro_deg_validation_plots <- ggplot(plot_df, aes(x = ad, y = log2_cpm, fill = ad)) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, size = 2) +
+    geom_signif(
+      data        = star_df,
+      aes(xmin = xmin, xmax = xmax,
+          annotations = annotations,
+          y_position  = y_position),
+      manual      = TRUE,
+      textsize    = 5,
+      vjust       = .3,
+      tip_length  = 0.02,
+      inherit.aes = FALSE
+    ) +
+  facet_wrap(~ gene, scales = "free_y",
+             labeller = labeller(gene = facet_labs), nrow = 2) +
+  scale_x_discrete(labels = c(ctl = "Control", ad = "AD")) +
+  labs(x = NULL, y = expression(log[2]~"CPM"),
+       title = "") +
+  scale_fill_manual(values = color_ad_ctl) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(face = "bold",color = "black",size = 15),
+        panel.grid.minor = element_blank())
+
+ggsave("hypoad-microglia-validation-degs.pdf",
+       micro_deg_validation_plots, width = 10, height = 8)
+```
+
+Plot mouse genes microglia DEGs that validated in same way
+Plot jak2 pathway sig results in glp1r/lepr in females
+```{r}
+library(qs2)
+library(dreamlet)
+processed_dreamlet = qs2::qs_read("../shared objs and code/processed_dreamlet.qs2")
+intermediate_dreamlet = qs2::qs_read("../shared objs and code/intermediate_dreamlet_obj.qs2")
+
+sig_mouse_gene_orthologs = ortholog_df$input[match(sig_human_ad_genes,ortholog_df$ortholog_name)]
+
+
+microglia_sig_degs_in_mice= extractData(intermediate_dreamlet, assay = "microglia", genes = sig_mouse_gene_orthologs)
+
+microglia_sig_degs_data_tidy = microglia_sig_degs_in_mice %>% pivot_longer(cols = sig_mouse_gene_orthologs, names_to = "gene", values_to = "log_expression")
+
+
+
+microglia_sig_degs_data_tidy$gene = factor(microglia_sig_degs_data_tidy$gene, levels = sig_mouse_gene_orthologs)
+#plot Stat3
+
+# --- significance annotations for mouse ---
+mouse_sig_labels <- mouse_dreamlet_results %>%
+  filter(gene %in% sig_mouse_gene_orthologs) %>%
+  mutate(
+    annotations = case_when(
+      adj.P.Val < 0.001 ~ "***",
+      adj.P.Val < 0.01  ~ "**",
+      adj.P.Val < 0.05  ~ "*",
+      TRUE               ~ ""
+    )
+  ) %>%
+  dplyr::select(gene, annotations) %>%
+  mutate(gene = factor(gene, levels = sig_mouse_gene_orthologs))
+
+mouse_plot_data <- microglia_sig_degs_data_tidy %>%
+  filter(age_genotype %in% c("old_Ntg", "old_5XFAD") & sex == "Female")
+
+mouse_star_df <- mouse_plot_data %>%
+  group_by(gene) %>%
+  summarise(ymax   = max(log_expression, na.rm = TRUE),
+            yrange = diff(range(log_expression, na.rm = TRUE)),
+            .groups = "drop") %>%
+  left_join(mouse_sig_labels, by = "gene") %>%
+  mutate(
+    xmin       = 1,
+    xmax       = 2,
+    y_position = ymax + yrange * 0.08
+  )
+
+color_ntg_5xfad <- c("Ntg" = "#a1bad4", "5XFAD" = "#f6b2ba")
+
+
+color_mapping_strains_to_colors <- c(
+"B6xBXD14" = "#77AADD",
+"B6xBXD77" = "#EE8866",
+"B6xBXD2Gpnmb" = "#EEDD88",
+"B6xBXD39" = "#FFAABB",
+"B6xBXD19" = "#99DDFF",
+"B6xBXD169" = "#44BB99",
+"B6xBXD28" = "#BBCC33",
+"B6xBXD12" = "#AAAA00",
+"B6xBXD73" = "#DDDDDD",
+"B6" = "#000000" # Black
+)
+
+
+microglia_sig_degs_plot <- ggplot(
+  mouse_plot_data,
+  aes(x = genotype, y = log_expression, fill = genotype)
+) +
+  geom_boxplot(outliers = FALSE) +
+  geom_jitter(width = .1, aes(color = strain), size = 3) +
+  geom_signif(
+    data        = mouse_star_df,
+    aes(xmin = xmin, xmax = xmax,
+        annotations = annotations,
+        y_position  = y_position),
+    manual      = TRUE,
+    textsize    = 5,
+    vjust       = .3,
+    tip_length  = 0.02,
+    inherit.aes = FALSE
+  ) +
+  facet_wrap(~ gene, scales = "free_y", nrow = 2) +
+  scale_x_discrete(labels = c("Ntg" = "Ntg", "5XFAD" = "5XFAD")) +
+  scale_fill_manual(name = "Genotype", values = color_ntg_5xfad) +
+  scale_color_manual(name = "Strain",values = color_mapping_strains_to_colors) +
+  guides(color = "none") +
+  labs(x = NULL, y = expression(log[2]~"CPM")) +
+  theme_bw(base_size = 11) +
+    theme(legend.position = "none",
+        strip.text = element_text(face = "bold.italic", size = 10),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.text = element_text(face = "bold",color = "black",size = 15),
+        panel.grid.minor = element_blank())
+
+
+ggsave("mouse_microglia_sig_degs_females.pdf",
+       microglia_sig_degs_plot, width = 10, height = 8)
+
+
+```

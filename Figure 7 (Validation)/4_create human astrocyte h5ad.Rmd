@@ -1,0 +1,186 @@
+---
+title: "astrocyte cross-species proportion validation"
+output: html_document
+date: "2026-08-21"
+---
+
+Cluster human astrocytes, and create h5ad
+```{r}
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(BPCells)
+library(khroma)
+library(harmony)
+astro_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+cell_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
+set.seed(1)
+
+cell_meta = cell_meta %>% filter(celltype == "Astrocyte") %>% filter(is_primary_data)
+astro_ge = astro_ge[,rownames(cell_meta)]
+get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
+  initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
+  initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
+  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
+  # Variable Gene Selection Using Seurat VST 
+  variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
+  variable_genes = variable_genes %>% filter(variable == T) 
+  variable_genes$gene = rownames(variable_genes)
+  variable_genes$standard_deviation = sqrt(variable_genes$variance)
+  gene_means <- variable_genes$mean
+  gene_std <- variable_genes$standard_deviation
+  initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
+  #write to disk before breaking sparsity via z-score
+  preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
+  #z-score
+  preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
+  #calculate 30 PCs 
+  svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
+  pca <- multiply_cols(svd$v, svd$d)
+  rownames(pca) = colnames(preprocessed_ge)
+  colnames(pca) = paste("PC_",seq(1,ncol(pca)))
+  return(pca)
+
+}
+#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
+
+
+create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
+  hnsw_index <- RcppHNSW::hnsw_build(
+    X = pc_coords,
+    ef = ef_index_build_param,
+    M = M_index_build_param,
+    distance = distance_metric,
+    n_threads = n_threads
+  )
+  nn_index <- RcppHNSW::hnsw_search(
+    X = pc_coords,
+    ann = hnsw_index,
+    k = knns_returned,
+    ef = 200,
+    n_threads = n_threads
+  )
+  
+  #convert to snn index
+  
+  #add cell ids as field
+  rownames(nn_index$idx) = rownames(pc_coords)
+  rownames(nn_index$dist) = rownames(pc_coords)
+  
+  #convert to snn graph via knn_to_snn function
+  snn_graph = knn_to_snn_graph(nn_index)
+  rownames(snn_graph) = rownames(nn_index$idx)
+  colnames(snn_graph) = rownames(nn_index$idx)
+  return(snn_graph)
+}
+
+
+
+#adapted from bpcells function
+get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  #dendro stuff start
+  
+  
+  #dendro stuff end
+  leiden_communities_found %>% 
+    igraph::membership() %>%
+    as.factor()
+}
+
+#adapted from bpcells function
+subcluster_assignments_and_modularity_score  = function(snn_graph, resolution = .1) {
+  #set random seed
+  set.seed(1)
+  objective_function = c("modularity")
+  clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
+  
+  leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
+  
+  modularity_score = leiden_communities_found$quality
+  cluster_assignments = leiden_communities_found$membership
+  names(cluster_assignments) = leiden_communities_found$names
+  
+  list(modularity_score = modularity_score, new_assignments = cluster_assignments)
+}
+
+subcluster_cells = function(ge_mat, cur_cluster_name, modularity_threshold = .9, leiden_resolution = .1) {
+  #return type - list with a boolean for successful clustering if modularity is higher than threshold and new cluster assignments if applicable
+  results_list = vector(mode = "list", length = 3)
+  names(results_list) = c("modularity_score","successful", "new_assignments")
+  ge_mat_pcs = get_pcs_from_initial_dataset(ge_mat)
+  snn_graph = create_snn_graph_from_pcs(ge_mat_pcs)
+  mod_score_and_assignments = subcluster_assignments_and_modularity_score(snn_graph, resolution = leiden_resolution)
+  results_list$modularity_score = mod_score_and_assignments$modularity_score
+  num_new_clusters = length(mod_score_and_assignments$new_assignments %>% unique())
+  if (mod_score_and_assignments$modularity_score > modularity_threshold & num_new_clusters > 1) {
+      results_list$successful = T
+      results_list$new_assignments = paste0(cur_cluster_name,"-",mod_score_and_assignments$new_assignments)
+      names(results_list$new_assignments) = names(mod_score_and_assignments$new_assignments)
+      results_list$pcs = ge_mat_pcs
+      results_list$snn_graph = snn_graph
+  } else{
+    results_list$successful = F
+    results_list$new_assignments = NA
+  }
+  return(results_list)
+}
+```
+
+
+```{r}
+astro_clusters = subcluster_cells(astro_ge,"astrocyte")
+
+
+
+get_lognorm_markers = function(cluster_assignments, non_norm_ge) {
+  assignments = cluster_assignments$new_assignments
+  non_norm_ge = non_norm_ge[,names(assignments)]
+  #log norm
+  non_norm_ge = multiply_cols(non_norm_ge, 1/Matrix::colSums(non_norm_ge))
+  non_norm_ge <- log1p(non_norm_ge * 1e6) # Log cpm
+  
+  #get markers
+  markers_per_clust = marker_features(mat = non_norm_ge, assignments)
+  markers_per_clust = markers_per_clust %>% mutate(l2fc = (foreground_mean - background_mean)/log(2))
+  markers_per_clust = markers_per_clust %>% mutate(cpm_expression = 100*(2^foreground_mean - 1))
+
+  markers_per_clust
+}
+
+astro_markers = get_lognorm_markers(cluster_assignments = astro_clusters, non_norm_ge = astro_ge)
+#nothing looks too unreasonable in terms of doublets (although some, ex: astrocyte-8/astrocyte-10 could be, but decided to keep them in case they're real populations)
+
+astro_meta = data.frame(cell_id = astro_clusters$new_assignments %>% names, cluster = astro_clusters$new_assignments)
+cell_meta = cell_meta %>% rownames_to_column("cell_id")
+astro_meta = astro_meta %>% left_join(cell_meta, by = "cell_id")
+rownames(astro_meta) = astro_meta$cell_id
+
+astro_ge = astro_ge[,astro_meta$cell_id]
+
+
+astro_meta$nUMIs = colSums(astro_ge)
+#create h5ad object
+var_metadata <- data.frame(gene = rownames(astro_ge))
+rownames(var_metadata) <- var_metadata$gene
+
+astro_anndata_obj <- anndata::AnnData(
+  X = NULL, 
+  obs = astro_meta, 
+  var = var_metadata, 
+  shape = c(ncol(astro_ge), nrow(astro_ge))
+)
+
+# Write anndata to h5ad
+#save astrocyte with var genes only
+anndata::write_h5ad(anndata = astro_anndata_obj, filename = "./human-astrocyte.h5ad")
+BPCells::write_matrix_anndata_hdf5(mat = astro_ge, path = "./human-astrocyte.h5ad", group = "X", gzip_level = 9)
+
+```
+

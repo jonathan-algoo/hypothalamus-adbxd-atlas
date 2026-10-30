@@ -1,0 +1,87 @@
+---
+title: "collecting all compositional results"
+output: html_document
+date: "2026-01-12"
+---
+
+Collate compositional results
+```{r}
+library(tidyverse)
+voomclr_results = readRDS("voomclr_prop_results.rds")
+ancombc_results = readRDS("ancombc2_prop_results.rds")
+sccomp_results = readRDS("sccomp_prop_results.rds")
+
+voomclr_results$method = "voomclr"
+ancombc_results$method = "ancombc2"
+sccomp_results$method = "sccomp"
+
+#clean and standardize column names
+ancombc_results$adj_p_val = ancombc_results$p_val_adj
+ancombc_results$raw_p_val = ancombc_results$p_val
+ancombc_results$direction = ifelse(ancombc_results$lfc > 0, "up", "down")
+
+
+voomclr_results$adj_p_val = voomclr_results$adj.P.Val
+voomclr_results$raw_p_val = voomclr_results$P.Value
+voomclr_results$direction = ifelse(voomclr_results$logFC > 0, "up", "down")
+
+sccomp_results$adj_p_val = sccomp_results$c_FDR
+sccomp_results$raw_p_val = NA #not mentioned in sccomp output
+sccomp_results$direction = ifelse(sccomp_results$c_effect > 0, "up", "down")
+
+
+sccomp_results_selected = sccomp_results %>%
+  select(cluster, cell_class, contrast, method, direction, adj_p_val, raw_p_val)
+
+#remove cluster_ prefix 
+voomclr_results$cluster = gsub("cluster_", "", voomclr_results$cluster)
+ancombc_results$cluster = gsub("cluster_", "", ancombc_results$cluster)
+sccomp_results$cluster = gsub("cluster_", "", sccomp_results$cluster)
+
+sccomp_results_selected = sccomp_results %>%
+  select(cluster, cell_class, contrast, method, direction, adj_p_val, raw_p_val)
+
+
+sccomp_results_selected = sccomp_results %>%
+  select(cluster, cell_class, contrast, method, direction, adj_p_val, raw_p_val)
+
+voomclr_results_selected = voomclr_results %>%
+  select(cluster, cell_class, contrast, method, direction, adj_p_val, raw_p_val)
+
+ancombc_results_selected = ancombc_results %>%
+  select(cluster, cell_class, contrast, method, direction, adj_p_val, raw_p_val)
+
+
+
+combined_results = rbind(voomclr_results_selected,
+                             ancombc_results_selected,
+                             sccomp_results_selected)
+
+
+#save combined results 
+saveRDS(combined_results, "../combined_compositional_results_all_methods.rds")
+```
+
+
+```{r}
+combined_results = readRDS("../combined_compositional_results_all_methods.rds")
+#identify results significant in 2 / 3 methods @ FDR of .1
+significant_results_at_least_2 = combined_results %>%
+  filter(adj_p_val < 0.1) %>%
+  group_by(cluster, cell_class, contrast, direction) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+
+#get adj p values by method for each cluster, cell_class, contrast, direction in one row
+significant_results_wide = significant_results_at_least_2 %>%
+  select(-raw_p_val) %>%
+  pivot_wider(names_from = method, values_from = adj_p_val, names_prefix = "adj_p_val_") 
+
+significant_results_wide_amyloid = significant_results_wide %>%
+  filter(grepl("amyloid", contrast))
+
+#micro 4, micro 5, and astro are only consistent significant amyloid results.
+
+```
+

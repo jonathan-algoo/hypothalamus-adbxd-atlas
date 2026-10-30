@@ -1,0 +1,138 @@
+---
+title: "marker plot medial mb human neurons"
+output: html_document
+date: "2026-09-22"
+---
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(BPCells)
+library(ggtext)
+
+annotations <- readRDS("./final_cluster_assignments_integrated_dset.rds")
+
+mb_ge <- open_matrix_dir(
+  "./rosmap_mb_prepro/decontx_counts/"
+)
+mb_neurons <- annotations %>%
+  filter(dataset != "hypoad", broadclass == "neuron")
+
+hypoad_ge <- open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
+hypoad_neurons <- annotations %>%
+  filter(dataset == "hypoad", broadclass == "neuron")
+
+genes_of_interest <- c(
+  "KCNC2", "FOXB1", "MEIS2", "EBF2",
+  "ST6GALNAC5", "EPS8", "SLC17A6", "SLC32A1"
+)
+```
+
+
+```{r}
+make_dotplot <- function(ge_matrix,
+                         cell_meta,
+                         selected_genes,
+                         cluster_col = "cluster_number",
+                         cell_id_col = "cell_id",
+                         plot_title  = "",
+                         y_label     = "Cluster") {
+
+  cell_ids <- cell_meta[[cell_id_col]]
+  clusters <- as.character(cell_meta[[cluster_col]])
+
+  cur_ge <- ge_matrix[, cell_ids]
+
+  cur_ge_ln <- multiply_cols(cur_ge, 1 / Matrix::colSums(cur_ge))
+  cur_ge_ln <- log1p(cur_ge_ln * 1e6)
+
+  percent_pb <- (cur_ge[selected_genes, ] > 0) %>%
+    pseudobulk_matrix(cell_groups = clusters, method = "mean", threads = 8L)
+
+  ln_pb <- cur_ge_ln[selected_genes, ] %>%
+    pseudobulk_matrix(cell_groups = clusters, method = "mean", threads = 8L)
+
+  dotplot_df <- data.frame()
+  for (gene in selected_genes) {
+    for (cluster in colnames(ln_pb)) {
+      avg_exp <- ln_pb[gene, cluster]
+      pct_exp <- percent_pb[gene, cluster] * 100
+      dotplot_df <- rbind(dotplot_df,
+                          data.frame(gene    = gene,
+                                     cluster = cluster,
+                                     avg_exp = avg_exp,
+                                     pct_exp = pct_exp))
+    }
+  }
+
+  dotplot_df$gene <- factor(dotplot_df$gene, levels = selected_genes)
+
+  # Build cluster grouping lookup
+  cluster_groups <- cell_meta %>%
+    select(all_of(c(cluster_col, "cluster"))) %>%
+    distinct() %>%
+    arrange(cluster, .data[[cluster_col]])
+
+  cluster_order <- as.character(cluster_groups[[cluster_col]])
+  dotplot_df$cluster <- factor(dotplot_df$cluster, levels = cluster_order)
+
+  # Add parent cluster group to dotplot_df
+  group_lookup <- setNames(cluster_groups$cluster, as.character(cluster_groups[[cluster_col]]))
+  dotplot_df$cluster_group <- group_lookup[as.character(dotplot_df$cluster)]
+  dotplot_df$cluster_group <- factor(dotplot_df$cluster_group,
+                                     levels = unique(cluster_groups$cluster))
+
+  ggplot(dotplot_df,
+         aes(x = gene, y = cluster, fill = avg_exp, size = pct_exp)) +
+    geom_point(shape = 21, color = "black") +
+    facet_grid(cluster_group ~ ., scales = "free_y", space = "free_y",
+               switch = "y") +
+    scale_size_area(max_size = 15, name = "Percent\nExpressed") +
+    scale_fill_gradient2(
+      mid = "white", high = "#D55E00", low = "#0072B2",
+      name = "Mean Log\nExpression"
+    ) +
+    ggtitle(plot_title) +
+    theme_classic(base_size = 15) +
+    scale_x_discrete(guide = guide_axis(angle = 45)) +
+    theme(
+      plot.title       = element_text(face = "bold", size = 30, hjust = 0.5),
+      axis.title.x     = element_text(face = "bold", size = 25),
+      axis.title.y     = element_text(face = "bold", size = 25),
+      axis.text.x      = element_text(face = "bold.italic", size = 17),
+      axis.text.y      = element_text(face = "bold", size = 17),
+      legend.title     = element_text(face = "bold"),
+      legend.text      = element_text(face = "bold", size = 20),
+      legend.position  = "right",
+      legend.key.size  = unit(0.5, "cm"),
+      strip.placement  = "outside",
+      strip.text.y.left = element_text(face = "bold", size = 14, angle = 0),
+      strip.background = element_rect(fill = NA, colour = "black"),
+      panel.spacing    = unit(0.15, "lines")
+    ) +
+    labs(x = "Gene", y = y_label)
+}
+```
+
+```{r}
+mb_plot <- make_dotplot(
+  ge_matrix      = mb_ge,
+  cell_meta      = mb_neurons,
+  selected_genes = genes_of_interest,
+  plot_title     = "Marker Genes – Medial MB Human Neurons"
+)
+mb_plot
+
+hypoad_plot <- make_dotplot(
+  ge_matrix      = hypoad_ge,
+  cell_meta      = hypoad_neurons,
+  selected_genes = genes_of_interest,
+  plot_title     = "Marker Genes – HypoAD Neurons"
+)
+hypoad_plot
+library(patchwork)
+
+full_marker = mb_plot / hypoad_plot
+
+ggsave("marker human.pdf",full_marker, width = 20, height = 20)
+```
+

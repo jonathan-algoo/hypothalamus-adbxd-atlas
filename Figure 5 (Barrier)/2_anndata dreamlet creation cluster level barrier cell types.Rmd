@@ -1,0 +1,138 @@
+---
+title: "anndata dreamlet creation - barrier cell types at cluster level"
+output: html_document
+date: "2026-09-14 "
+---
+
+Create one anndata obj with just the barrier cell types
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+library(reticulate)
+library(SingleCellExperiment)
+library(singleCellTK)
+use_python("/opt/miniconda3/bin/python")
+#load ge matrix
+ge_mat = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+
+#filter just to barrier cell types (w/o GLS astrocytes since already done)
+barrier_celltypes = c("vascular-endothelial_1","vascular-endothelial_2","vascular-endothelial_3","vascular-pericytes","vascular-smc","VLMC-1","VLMC-2","VLMC-3","VLMC-4","VLMC-5","ependymal-1","ependymal-2","ependymal-3","tanycyte-1", "tanycyte-2","tanycyte-3")
+cluster_assignments = non_neuronal_cluster_assignments[non_neuronal_cluster_assignments %in% barrier_celltypes]
+```
+
+Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments. Perform testing and evaluation on each cell class separately.
+```{r}
+#clean animal metadata
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+animal_metadata$age = factor(animal_metadata$age, levels = c("young","old"))
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
+cell_metadata = cell_metadata %>% mutate(cluster = case_when(
+  cluster %in% df_internal_and_official_name$numeric_id ~ df_internal_and_official_name$official_name[match(cluster, df_internal_and_official_name$numeric_id)],
+  .default = cluster
+))
+cell_metadata$cluster = as.factor(cell_metadata$cluster)
+
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+# add cell class
+cell_metadata =cell_metadata %>% mutate(cell_class = case_when(
+  cluster %in% df_internal_and_official_name$official_name ~ "neuronal",#neuronal
+  .default = sub("[-_].*", "", cluster) #non-neuronal
+)) 
+cell_metadata$cell_class = as.factor(cell_metadata$cell_class)
+#Identify classes with only one cluster and remove from proportion analysis, since we do it by class - removed tcells, bam
+#add "animal_" to animal_id column to avoid problems with sccomp, and convert to factor; and do same for animal_metadata
+cell_metadata$animal_id = paste0("animal_",cell_metadata$animal_id) %>% as.factor() 
+```
+
+
+Write anndata objects for all cells together
+```{r}
+#Check no duplicated cell ids
+try(if(!length(cell_metadata$cell_id %>% duplicated() %>% which()) == 0) stop("duplicated ids"))
+
+cell_metadata$sex = factor(cell_metadata$sex, levels = c("Male","Female"))
+cell_metadata$genotype = factor(cell_metadata$genotype, levels = c("Ntg","5XFAD"))
+cell_metadata$strain = factor(cell_metadata$strain)
+cell_metadata$strain = cell_metadata$strain %>% relevel(ref = "B6")
+
+#reparametrize so age*genotype combinations are in separate groups
+cell_metadata = cell_metadata %>%
+  mutate(age_genotype = interaction(age, genotype,sep = "_"))
+#levels: young_Ntg old_5XFAD young_5XFAD old_Ntg
+```
+
+
+```{r}
+genes_to_remove <- rownames(ge_mat)[grepl("^Gm|Rik", rownames(ge_mat))]
+ge_mat = ge_mat[!rownames(ge_mat) %in% genes_to_remove, ]
+
+# Get counts 
+all_counts = ge_mat[,cell_metadata$cell_id] 
+
+# Prepare metadata 
+rownames(cell_metadata) <- cell_metadata$cell_id
+
+# Prepare var metadata 
+var_metadata <- data.frame(gene = rownames(all_counts))
+rownames(var_metadata) <- var_metadata$gene
+```
+
+
+```{r}
+library(anndata)
+
+# Create anndata object
+anndata_obj <- anndata::AnnData(
+  X = NULL, 
+  obs = cell_metadata, 
+  var = var_metadata, 
+  shape = c(ncol(all_counts), nrow(all_counts))
+)
+
+
+# Write anndata to h5ad
+anndata::write_h5ad(anndata = anndata_obj, filename = "./barrier-cell-cluster-level-dreamlet-anndata.h5ad")
+BPCells::write_matrix_anndata_hdf5(mat = all_counts, path = "./barrier-cell-cluster-level-dreamlet-anndata.h5ad", group = "X", gzip_level = 9)
+```

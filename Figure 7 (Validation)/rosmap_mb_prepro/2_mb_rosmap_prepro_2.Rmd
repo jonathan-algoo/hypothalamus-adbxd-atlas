@@ -1,0 +1,177 @@
+---
+title: "mb_rosmap_analysis_2"
+output: html_document
+date: "2026-06-16"
+---
+
+Initial clustering pre-Decontx and ScDblFinder (using BPCells)
+```{r}
+
+library(Seurat)
+library(Matrix)
+library(magrittr)
+library(BPCells)
+mat = open_matrix_dir("./combined_bpcells_mat/")
+# Normalize by reads-per-cell
+mat <- multiply_cols(mat, 1/Matrix::colSums(mat))
+# Log normalization
+mat <- log1p(mat * 10000) # Log normalization
+
+stats <- matrix_stats(mat, row_stats="variance")
+
+# To keep the example small, we'll do a very naive variable gene selection
+variable_genes <- order(stats$row_stats["variance",], decreasing=TRUE) %>% 
+  head(2000) %>% 
+  sort()
+
+mat_norm <- mat[variable_genes,]
+
+mat_norm <- mat_norm %>% write_matrix_memory(compress=FALSE)
+
+gene_means <- stats$row_stats["mean",variable_genes]
+gene_vars <- stats$row_stats["variance", variable_genes]
+mat_norm <- (mat_norm - gene_means) / gene_vars
+
+svd <- BPCells::svds(mat_norm, k=30)
+pca <- multiply_cols(svd$v, svd$d)
+
+graph_pre_clustering <- knn_hnsw(pca, ef = 1000) %>% # Find approximate nearest neighbors
+  knn_to_snn_graph() 
+
+clusters = graph_pre_clustering %>% 
+  cluster_graph_leiden(resolution = .05) 
+library(tidyverse)
+markers_per_clust = marker_features(mat = mat, clusters)
+markers_per_clust = markers_per_clust %>% mutate(l2fc = (foreground_mean - background_mean)/log(2))
+markers_per_clust = markers_per_clust %>% mutate(cpm_expression = 100*(2^foreground_mean - 1))
+
+
+
+genes <- c("RBFOX1", "SYT1", "RBFOX1", "SYT1", "GFAP", "AQP4", "CSF1R", "CX3CR1", "TMEM119", "PTPRC", "SKAP1", "AQP4", "PDGFRA", "VCAN", "MEGF11", "SYT1", "SNAP25", "PDGFRB", "CLDN5", "FLT1", "MBP", "MOG", "MAG", "S100B", "GFAP")
+
+cur_markers_select = cur_markers %>% filter(feature %in% genes)
+#1- neuron
+#2- neuron
+#3- neuron
+#4- oligo 
+#5- oligo
+#6- astro
+#7- vascular
+#8- immune
+#9- oligo
+#10- opc
+#11 - neuron
+#12- neuron
+#13- astrocyte
+#14 - vascular
+#15 - oligo
+#16 - immune
+```
+
+```{r}
+# Map each Leiden cluster number to the cell-type name assigned above.
+# Looking up by name (not position) so it's robust to factor-level ordering.
+cluster_annotation <- c(
+  "1"  = "neuron",
+  "2"  = "neuron",
+  "3"  = "neuron",
+  "4"  = "oligo",
+  "5"  = "oligo",
+  "6"  = "astrocyte",
+  "7"  = "vascular",
+  "8"  = "immune",
+  "9"  = "oligo",
+  "10" = "opc",
+  "11" = "neuron",
+  "12" = "neuron",
+  "13" = "astrocyte",
+  "14" = "vascular",
+  "15" = "oligo",
+  "16" = "immune"
+)
+
+cell_clusters <- tibble(
+  cell_id   = colnames(mat),
+  leiden    = as.character(clusters),
+  cell_type = unname(cluster_annotation[as.character(clusters)])
+)
+
+# Sanity checks: one row per cell, every cluster got a label
+stopifnot(nrow(cell_clusters) == ncol(mat))
+stopifnot(!anyNA(cell_clusters$cell_type))
+
+cell_clusters <- cell_clusters %>%
+  mutate(sample = str_extract(cell_id, "^[^_]+"), .after = cell_id)
+
+cell_clusters %>% count(sample)
+head(cell_clusters)
+```
+
+Run Decontx per sample, then add to new decontx bpcells obj
+```{r}
+original_mat = open_matrix_dir("./combined_bpcells_mat/")
+unique_samples = cell_clusters$sample %>% unique
+
+decontx_no_counts_results_list = vector(mode = "list", length = length(unique_samples))
+names(decontx_no_counts_results_list) = unique_samples
+
+for (i in 1:length(unique_samples)) {
+  sample_id = unique_samples[i] %>% as.character()
+  cur_sample_df = cell_clusters %>% filter(sample == sample_id)
+  cur_sample_cells = cur_sample_df %>% pull(cell_id)
+  cur_sample_ge = original_mat[,cur_sample_cells] %>% as("dgCMatrix")
+  cur_sample_broadclasses = cur_sample_df$cell_type
+  decontx_cur_sample_result = decontX::decontX(cur_sample_ge, z = cur_sample_broadclasses)
+  cur_decontx_counts = decontx_cur_sample_result$decontXcounts %>% as("IterableMatrix") %>% round()
+  if (i == 1) {
+    all_decontx_counts = cur_decontx_counts %>% write_matrix_dir("./decontx_counts",overwrite = T)
+  } else {
+    all_decontx_counts = cbind(all_decontx_counts, cur_decontx_counts) 
+    all_decontx_counts = all_decontx_counts %>% write_matrix_dir("./decontx_counts",overwrite = T)
+  }
+  
+  #remove counts from decontx_cur_sample_result then save the rest of the object to the decontx_no_counts_results_list (ex: has contamination score, etc.)
+  decontx_cur_sample_result$decontXcounts = NULL
+  decontx_no_counts_results_list[[sample_id]] = decontx_cur_sample_result
+  gc()
+}
+```
+
+
+Run scDblFinder per library
+```{r}
+library(scDblFinder)
+mb_counts = open_matrix_dir("./decontx_counts/")
+mb_counts_df = tibble(
+  cell_id   = colnames(mb_counts),
+  cell_type    = cell_clusters$cell_type[match(colnames(mb_counts), cell_clusters$cell_id)],
+  sample = cell_clusters$sample[match(colnames(mb_counts), cell_clusters$cell_id)]
+)
+
+mb_counts_dgc_matrix = mb_counts %>% as("dgCMatrix")
+
+```
+
+
+```{r}
+library(SingleCellExperiment)
+
+sce = SingleCellExperiment(
+  assays  = list(counts = mb_counts_dgc_matrix),
+  colData = DataFrame(mb_counts_df, row.names = mb_counts_df$cell_id)
+)
+
+# Per-library doublet detection. `samples` points at the colData column,
+# so each sample is processed independently.
+sce = scDblFinder(sce, samples = "sample",clusters = "cell_type", BPPARAM = BiocParallel::MulticoreParam(workers = 8))
+
+# scDblFinder writes its results into colData; pull them back onto the df
+mb_counts_df = mb_counts_df %>%
+  mutate(
+    scDblFinder_class = as.character(sce$scDblFinder.class),
+    scDblFinder_score = sce$scDblFinder.score
+  )
+
+
+saveRDS(mb_counts_df,file = "doublet and initial cell types pre qc.rds")
+```

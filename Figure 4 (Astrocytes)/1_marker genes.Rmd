@@ -1,0 +1,195 @@
+---
+title: "marker genes"
+output: html_document
+date: "2025-12-31"
+---
+
+```{r}
+library(BPCells)
+library(tidyverse)
+library(sccomp)
+library(readxl)
+set.seed(1)
+all_ge = open_matrix_dir("../shared objs and code/post_qc_decontx_counts/")
+genes_to_remove <- rownames(all_ge)[grepl("^Gm|Rik", rownames(all_ge))]
+
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+
+animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
+animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
+
+
+#add CFA and CFM (cognitive metrics) for each mouse
+animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+
+
+#add Weight (metabolic/physical metrics) for each mouse
+animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
+#z score continuous variables (Weight, CFA, CFM)
+animal_metadata <- animal_metadata %>%
+  mutate(across(c(Weight, CFA, CFM), ~ scale(.x, center = TRUE, scale = TRUE)[, 1]))
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+#load neuronal + non-neuronal assignments
+non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal_assignments.rds")
+neuronal_cluster_assignments = readRDS("../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
+neuronal_names  = names(neuronal_cluster_assignments)
+#append neuronal to show the class
+neuronal_cluster_assignments = paste0("neuronal-",neuronal_cluster_assignments)
+names(neuronal_cluster_assignments) = neuronal_names
+cluster_assignments = c(non_neuronal_cluster_assignments, neuronal_cluster_assignments)
+
+#create df with cell id and cluster for each cell
+cell_metadata = data.frame(cell_id = names(cluster_assignments), cluster = cluster_assignments)
+#get animal id from name of cell ()
+cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
+#join cell metadata with animal metadata by animal_id
+cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
+
+#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
+animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
+
+#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
+cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
+cell_metadata = cell_metadata %>% droplevels()
+
+#remove tcells since only one cluster
+cell_metadata = cell_metadata %>% filter(cluster != "tcells")
+
+# Split  on cell class
+cell_metadata$cell_class <- sub("[-_].*", "", cell_metadata$cluster)
+
+#Identify classes with only one cluster (remove from proportion analysis)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
+all_classes = cell_metadata$cell_class %>% unique
+all_classes = all_classes[all_classes != "neuronal"]
+
+
+```
+
+```{r}
+cur_meta = cell_metadata %>% filter(cell_class == "astrocyte")
+cur_ge = all_ge[,cur_meta$cell_id]
+cur_ge_ln <- multiply_cols(cur_ge, 1/Matrix::colSums(cur_ge))
+cur_ge_ln <- log1p(cur_ge_ln * 1e6) # Log transform
+
+#find markers using marker_features
+cur_markers = marker_features(cur_ge_ln, cur_meta$cluster)
+cur_markers$l2fc = (cur_markers$foreground_mean - cur_markers$background_mean)/log(2)
+
+astro_4 = cur_markers %>% filter(foreground == "astrocyte-4")
+```
+
+
+Specific markers (in order)
+Astrocyte-1: Arhgef28, Tsc22d3
+Astrocyte-2: Tspo, C3
+Astrocyte-3: Myoc
+Astrocyte-4: Ifit1, Ifit3
+Astrocyte-5: Serpina3n, Chi3l1
+Astrocyte-6: Frmpd1, Folh1, Tshz2
+Astrocyte-7: Pla2g7, Gsdme
+Astrocyte-8:Unc13c, Deptor
+Astrocyte-9: Fos, Nr4a1
+Others: Gfap, Vim, Aqp4, Xist, Tsix, Uty
+```{r}
+genes_to_plot = c(
+  "Arhgef28", "Tsc22d3",
+  "Tspo", "C3",
+  "Myoc",
+  "Ifit1", "Ifit3",
+  "Serpina3n", "Chi3l1",
+  "Frmpd1","Folh1", "Tshz2",
+  "Pla2g7", "Gsdme",
+  "Unc13c", "Deptor",
+  "Fos", "Nr4a1",
+  "Gfap", "Vim", "Aqp4", "Xist", "Tsix", "Uty"
+)
+selected_genes = genes_to_plot
+```
+
+Plot Dotplot of aggregate log normalized expression (fill) and percent (size) of
+each cluster
+```{r}
+#note: good marker list found at  https://www.nature.com/articles/s41593-020-00783-4/tables/1 (Escartin, Galea et al, 2021)
+percent_pseudobulk = all_ge[selected_genes,cur_meta$cell_id] > 0
+percent_pseudobulk = percent_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+
+ln_pseudobulk = cur_ge_ln[selected_genes,]
+ln_pseudobulk = ln_pseudobulk %>% pseudobulk_matrix(cell_groups = cur_meta$cluster, method = "mean", threads = 8L)
+dotplot_df = data.frame()
+for(gene in selected_genes){
+  for(cluster in unique(cur_meta$cluster)){
+    avg_exp = ln_pseudobulk[gene, cluster]
+    pct_exp = percent_pseudobulk[gene, cluster] * 100
+    dotplot_df = rbind(dotplot_df, data.frame(gene = gene, cluster = cluster, avg_exp = avg_exp, pct_exp = pct_exp))
+  }
+}
+
+dotplot_df$cluster = str_to_title(dotplot_df$cluster)
+
+dotplot_df$gene <- factor(dotplot_df$gene, levels = selected_genes)
+
+#zscore by gene
+dotplot_df <- dotplot_df %>%
+  group_by(gene) %>%
+  mutate(avg_exp = scale(avg_exp, center = TRUE, scale = TRUE)[, 1]) %>%
+  ungroup()
+```
+
+
+```{r}
+library(ggtext)
+
+# Use markdown syntax: *text* for italics
+cluster_labels <- c(
+  "Astrocyte-1" = "Astrocyte-1 (*Arhgef28/Tsc22d3*)",
+  "Astrocyte-2" = "Astrocyte-2 (*Tspo/C3*)",
+  "Astrocyte-3" = "Astrocyte-3 (*Myoc*)",
+  "Astrocyte-4" = "Astrocyte-4 (*Ifit1/Ifit3*)",
+  "Astrocyte-5" = "Astrocyte-5 (*Serpina3n/Chi3l1*)",
+  "Astrocyte-6" = "Astrocyte-6 (*Frmpd1/Folh1/Tshz2*)",
+  "Astrocyte-7" = "Astrocyte-7 (*Frmpd1/Pla2g7/Gsdme*)",
+  "Astrocyte-8" = "Astrocyte-8 (*Unc13c/Deptor*)",
+  "Astrocyte-9" = "Astrocyte-9 (*Fos/Nr4a1*)"
+)
+
+dotplot_df$cluster_label <- cluster_labels[dotplot_df$cluster]
+dotplot_df$cluster_label <- factor(dotplot_df$cluster_label, levels = cluster_labels)
+
+astro_marker_plot = ggplot(dotplot_df, aes(x = gene, y = cluster_label, fill = avg_exp, size = pct_exp)) +
+  geom_point(shape = 21, color = "black") +
+  scale_size_area(max_size = 20, name = "Percent\nExpressed") +
+  scale_fill_gradient2(mid = "white", high = "#D55E00", low = "#0072B2", name = "Scaled Log-\nNormalized GE") +
+  theme_classic(base_size = 26) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 35),
+    axis.title.y = element_text(face = "bold", size = 35),
+    axis.text.x = element_text(face = "bold"),
+    axis.text.y = element_markdown(face = "bold"), 
+    legend.title = element_text(face = "bold", size = 30),
+    legend.text = element_text(face = "bold", size = 25),
+    legend.position = "right",
+    legend.key.size = unit(1.3, "cm")
+  ) +
+  labs(x = "Marker Gene", y = "Cluster")
+ggsave("astrocyte_marker_dotplot.pdf", astro_marker_plot, width = 27, height = 9)
+```

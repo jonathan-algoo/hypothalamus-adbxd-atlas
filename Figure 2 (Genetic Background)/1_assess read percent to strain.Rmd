@@ -1,0 +1,79 @@
+---
+title: "variance partition analysis vis"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(tibble)
+library(ggplot2)
+library(patchwork)
+library(grid)
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+
+#change age_at_death to "young" for 6 and "old" for 14
+animal_metadata$age = case_when(
+  animal_metadata$age == "6" ~ "young",
+  animal_metadata$age == "14" ~ "old",
+  .default = NA
+)
+
+```
+
+
+
+```{r}
+library(readr)
+read_percent_per_sample = read_csv("../shared objs and code/10x_html_metrics_summaries/mapping_metrics.csv")
+read_percent_per_sample$animal_id = read_percent_per_sample$sample_id %>% as.character() 
+read_percent_per_sample = read_percent_per_sample %>% select(-sample_id)
+animal_metadata = animal_metadata %>% left_join(read_percent_per_sample, by = "animal_id")
+animal_metadata$Reads_Mapped_to_Genome <- as.numeric(gsub("%", "", animal_metadata$`Reads Mapped to Genome`)) / 100
+animal_metadata$Reads_Mapped_Confidently_to_Transcriptome <- as.numeric(gsub("%", "", animal_metadata$`Reads Mapped Confidently to Transcriptome`)) / 100
+```
+
+```{r}
+# ANOVA: genome
+anova_genome <- aov(Reads_Mapped_to_Genome ~ strain, data = animal_metadata)
+summary(anova_genome)
+
+# ANOVA: transcriptome
+anova_transcriptome <- aov(Reads_Mapped_Confidently_to_Transcriptome ~ strain, data = animal_metadata)
+summary(anova_transcriptome)
+```
+
+```{r}
+# pull p-values from the ANOVAs
+p_genome <- summary(anova_genome)[[1]]$`Pr(>F)`[1]
+p_transcriptome <- summary(anova_transcriptome)[[1]]$`Pr(>F)`[1]
+
+genome_plot = ggplot(animal_metadata, aes(x = strain, y = Reads_Mapped_to_Genome)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  labs(y = "Reads Mapped to Genome (Cellranger Quantification)", x = "Strain",
+       subtitle = paste0("ANOVA p = ", signif(p_genome, 3))) +
+  ylim(c(.3, 1)) +
+  theme_minimal()
+
+transcriptome_plot = ggplot(animal_metadata, aes(x = strain, y = Reads_Mapped_Confidently_to_Transcriptome)) +
+  geom_boxplot(outliers = F) +
+  geom_jitter(width = 0.2, alpha = 0.5) +
+  ylim(c(.3, 1)) +
+  labs(y = "Reads Mapped Confidently to Transcriptome (Cellranger Quantification)", x = "Strain",
+       subtitle = paste0("ANOVA p = ", signif(p_transcriptome, 3))) +
+  theme_minimal()
+
+strain_vis_plot = genome_plot + transcriptome_plot
+strain_vis_plot
+ggsave("strain alignment visualizations.pdf",strain_vis_plot,width = 20, height = 7)
+```
+

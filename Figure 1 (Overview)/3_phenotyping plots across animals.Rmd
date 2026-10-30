@@ -1,0 +1,234 @@
+---
+title: "phenotyping plots across animals"
+output: html_document
+date: "2025-03-31"
+---
+
+Load neuronal + non-neuronal assignments
+```{r setup}
+library(BPCells)
+library(tidyverse)
+library(patchwork)
+library(khroma)
+
+animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
+animal_metadata$ID = as.character(animal_metadata$ID)
+
+#remove animal 1537 for the paired analysis - lower yield and was replaced by 18261 (reason why we have 3 of B6xBXD19_Female_5XFAD for strain_sex_genotype)
+animal_metadata = animal_metadata %>% filter(ID != "1537")
+
+animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
+#load animal phenotype data
+animal_phenotype_data = read.csv("./calo_bx_data_clean_20260501.csv")
+
+#filter to just < 14 and chow diet
+animal_phenotype_data = animal_phenotype_data %>% filter(AgeGrp <= 14) %>% filter(Diet == "Chow")
+
+animal_phenotype_data_ge_mice = animal_phenotype_data 
+
+cur_strains = animal_metadata$strain %>% unique
+
+#add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
+animal_phenotype_weight = animal_phenotype_data_ge_mice %>% filter(!is.na(Weight)) %>% select(ID, AgeGrp, Sex, Genotype, Line.short, Weight) %>% pivot_wider(names_from = AgeGrp, values_from = Weight)
+library(tidyverse)
+library(khroma)
+
+
+
+animal_phenotype_weight = animal_phenotype_weight %>% filter(Line.short %in% cur_strains)
+# Reshape weight data back to long format for plotting
+weight_long <- animal_phenotype_weight %>%
+  pivot_longer(
+    cols = -c(ID, Sex, Genotype, Line.short),
+    names_to = "AgeGrp",
+    values_to = "Weight"
+  ) %>%
+  filter(!is.na(Weight)) %>%
+  mutate(
+    AgeGrp_num = as.numeric(gsub("[^0-9.]", "", AgeGrp)),
+    strain_sex = paste(Line.short, Sex, sep = "_")
+  ) %>%
+  arrange(AgeGrp_num) %>%
+  mutate(AgeGrp = factor(AgeGrp, levels = unique(AgeGrp[order(AgeGrp_num)])))
+
+
+library(tidyverse)
+library(khroma)
+
+# Continuous x: AgeGrp_num already exists in weight_long from your reshape
+weight_long$Sex = factor(weight_long$Sex, levels = c("Male","Female"))
+weight_long$Genotype = factor(weight_long$Genotype, levels = c("Ntg","5XFAD"))
+
+# Per-(age × sex × genotype) sample sizes for annotation
+library(ggrepel)
+
+
+weight_means = weight_long %>%
+  group_by(AgeGrp_num, Sex, Genotype) %>%
+  summarize(
+    mean_weight = mean(Weight),
+    n = n(),
+    sem_weight = sd(Weight) / sqrt(n),
+    .groups = "drop"
+  )
+
+
+weight_n_show <- weight_means %>%
+  filter(AgeGrp_num %in% c(3, 6,10, 14)) %>%
+  mutate(lab_y = mean_weight + ifelse(Genotype == "Ntg", 8, -8))
+
+weight_mean_overlay = ggplot(weight_long, aes(x = AgeGrp_num, y = Weight, color = Genotype)) +
+  geom_line(aes(group = ID), alpha = 0.2, linewidth = 0.15) +
+  stat_summary(aes(group = Genotype), fun = mean,
+               geom = "line", linewidth = 0.8) +
+  geom_point(data = weight_means, aes(x = AgeGrp_num, y = mean_weight), size = 1) +
+  geom_errorbar(data = weight_means,
+                aes(x = AgeGrp_num, y = mean_weight, ymin = mean_weight - sem_weight, ymax = mean_weight + sem_weight),
+                width = 0.3, linewidth = 0.4) +
+geom_label(data = weight_n_show,
+             aes(y = lab_y, label = paste0("n = ", n)),
+             size = 5, fill = "#E6E6E6", label.size = 0,
+           nudge_x = .2,
+             label.padding = unit(.08, "lines"),
+             show.legend = FALSE) +
+  facet_wrap(~ Sex) +
+  scale_x_continuous(breaks = sort(unique(weight_long$AgeGrp_num)),
+                     expand = expansion(mult = c(0.03, 0.12))) +
+  scale_color_bright() +
+  labs(x = "Age (months)", y = "Weight (g)") +
+  theme_classic(base_size = 18) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(2, "pt"),
+        text = element_text(face = "bold"),
+        legend.position = "none")
+
+
+# ============================================================
+# CFA + Sensorimotor_composite at snRNA-seq endpoints (6 and 14 mo)
+# Boxplot per genotype, faceted by sex x timepoint, same strain restriction
+# ============================================================
+
+
+
+cfa_sleep_long = animal_phenotype_data_ge_mice %>%
+  filter(Line.short %in% cur_strains) %>%
+  mutate(AgeGrp_num = as.numeric(gsub("[^0-9.]", "", AgeGrp))) %>%
+  filter(AgeGrp_num %in% c(6, 14)) %>%
+  select(ID, Sex, Genotype, strain = Line.short, AgeGrp_num,
+         CFA = CFC.PS4, sleep_24hrtotal) %>%
+  pivot_longer(c(CFA, sleep_24hrtotal), names_to = "metric", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(
+    metric    = factor(metric, levels = c("CFA", "sleep_24hrtotal")),
+    Sex       = factor(Sex, levels = c("Male", "Female")),
+    Genotype  = factor(Genotype, levels = c("Ntg", "5XFAD")),
+    timepoint = factor(paste0(AgeGrp_num, " mo"), levels = c("6 mo", "14 mo"))
+  )
+cfa_sleep_long = cfa_sleep_long %>% 
+  mutate(
+    value = case_when(
+      metric == "sleep_24hrtotal" ~ value / 3600,
+      .default = value
+    ),
+    metric = case_when(
+      metric == "sleep_24hrtotal" ~ "hrs_sleep",
+      .default = metric
+    )
+  )
+
+cond_lev <- c("Male, 6 mo", "Male, 14 mo", "Female, 6 mo", "Female, 14 mo")
+cfa_sleep_long <- cfa_sleep_long %>%
+  mutate(condition = factor(paste0(Sex, ", ", timepoint), levels = cond_lev))
+cfa_sm_n <- cfa_sleep_long %>% count(metric, condition, Genotype, name = "n")
+```
+
+```{r}
+library(sandwich)
+library(lmtest)
+library(ggsignif)
+
+# ---- cluster-robust tests ----
+sig_results <- data.frame()
+
+for (cur_age in c(6, 14)) {
+  for (cur_sex in c("Male", "Female")) {
+    for (cur_metric in c("CFA", "hrs_sleep")) {
+
+      df <- cfa_sleep_long %>%
+        filter(AgeGrp_num == cur_age, Sex == cur_sex, metric == cur_metric) %>%
+        filter(!is.na(value))
+
+      mod_lm <- lm(value ~ Genotype, data = df)
+      ct <- lmtest::coeftest(mod_lm,
+                             vcov = sandwich::vcovCL(mod_lm, cluster = ~strain, type = "HC2"))
+      pval <- ct["Genotype5XFAD", "Pr(>|t|)"]
+
+      sig_results <- rbind(sig_results, data.frame(
+        metric    = cur_metric,
+        condition = paste0(cur_sex, ", ", cur_age, " mo"),
+        p_value   = pval,
+        y_max     = max(df$value, na.rm = TRUE)
+      ))
+    }
+  }
+}
+
+sig_results <- sig_results %>%
+  filter(!is.na(p_value)) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    condition  = factor(condition, levels = cond_lev),
+    metric     = factor(metric, levels = c("CFA", "hrs_sleep")),
+    stars      = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    ),
+    xmin        = "Ntg",
+    xmax        = "5XFAD",
+    y_position  = y_max * 1.08,
+    annotations = stars
+  )
+
+# ---- plot ----
+cfa_sleep_plot <- ggplot(cfa_sleep_long,
+                         aes(x = Genotype, y = value, fill = Genotype)) +
+  geom_boxplot(outliers = FALSE, width = 0.6, alpha = 0.5, color = "grey25") +
+  geom_jitter(width = 0.18, height = 0, size = 0.7, alpha = 0.4, color = "grey25") +
+  geom_text(data = cfa_sm_n,
+            aes(x = Genotype, y = Inf, label = paste0("n=", n)),
+            vjust = 1.4, size = 5, inherit.aes = FALSE) +
+  geom_signif(data = sig_results,
+              aes(xmin = xmin, xmax = xmax,
+                  y_position = y_position, annotations = annotations),
+              manual = TRUE, textsize = 5, tip_length = 0.02,
+              inherit.aes = FALSE) +
+  facet_grid(metric ~ condition, scales = "free_y",
+             labeller = labeller(metric = c(CFA = "% Freezing (CFA Assay)", hrs_sleep = "Hours Slept"))) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.22))) +
+  scale_fill_bright() +
+  labs(x = "Genotype", y = NULL) +
+  theme_classic(base_size = 18) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        text = element_text(face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(2, "pt"),
+        legend.position = "none")
+
+cfa_sleep_plot
+
+```
+
+
+```{r}
+combined_plot = weight_mean_overlay + cfa_sleep_plot   &
+  theme(plot.margin       = margin(1, 1, 1, 1),
+        axis.title.y      = element_text(margin = margin(r = 1)),
+        axis.text.y       = element_text(margin = margin(r = 1)),
+        axis.ticks.length = unit(1, "pt"))
+
+ggsave("weight_cfa_llnge_representation.pdf", combined_plot,
+       width = 15, height = 7)
+```

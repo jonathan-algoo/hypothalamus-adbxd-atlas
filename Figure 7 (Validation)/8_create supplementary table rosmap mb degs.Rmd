@@ -1,0 +1,13 @@
+---
+title: "mammillary dge supp table rosmap - selected degs"
+output: html_document
+date: "2026-08-12"
+---
+
+```{r}
+library(tidyverse)
+rosmap_results = read_csv("human_neuron_rosmap_dreamlet_results.csv")
+selected_results = rosmap_results %>% filter(ID %in% c("TGFB2","RHBDL3","MYO16","BMPER") &  assay == "medial mammillary neuron" )
+write_csv(selected_results,"rosmap_results_selected_degs.csv")
+```
+
