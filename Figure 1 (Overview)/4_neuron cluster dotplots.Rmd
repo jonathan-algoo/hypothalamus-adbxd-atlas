@@ -11,7 +11,7 @@ library(ggplot2)
 library(BPCells)
 library(khroma)
 
-#plot neuronal/non-neuronal discriminatory gene dotplot separately, then together
+#plot neuronal dotplot
 neuron_assignments = readRDS(file = "../shared objs and code/neuronal_number_ids_cluster_assignments.rds")
 df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
 neuron_names = names(neuron_assignments)
@@ -49,7 +49,7 @@ selected_neuronal_percent = selected_neuronal_percent %>% as.data.frame() %>% ro
 selected_neuronal_ge_ln = selected_neuronal_ge_ln %>% as.data.frame() %>% rownames_to_column("gene") %>%  pivot_longer(-gene, names_to = "cluster", values_to = "ln_ge")
 selected_neuronal_both = selected_neuronal_percent %>% left_join(selected_neuronal_ge_ln)
 
-#scale and center/zscore ln ge to between -1 and 1 for each gene
+#scale and center/zscore ln ge 
 selected_neuronal_both = selected_neuronal_both %>%
         group_by(gene) %>%
         mutate(z_score_ln_ge = scale(ln_ge))

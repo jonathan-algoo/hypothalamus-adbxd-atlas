@@ -139,9 +139,6 @@ for(i in seq_along(cluster_list)) {
   cluster_counts$strain = as.factor(cluster_counts$strain)
   cluster_counts$sex = as.factor(cluster_counts$sex)
   cluster_counts$age = as.factor(cluster_counts$age)
-  #add "animal_" and "cluster_" to relevant columns to avoid problems with sccomp
-  #cluster_counts$animal_id = paste0("animal_", cluster_counts$animal_id) %>% as.factor()
-  #cluster_counts$cluster = paste0("cluster_", cluster_counts$cluster) %>% as.factor()
   #relevel to get the following as reference: genotype - Ntg, age - 6, sex - M
   cluster_counts$genotype = relevel(cluster_counts$genotype, ref = "Ntg")
   cluster_counts$age = relevel(cluster_counts$age, ref = "6")
@@ -171,12 +168,10 @@ microglia_proportions = micro_counts %>% ungroup %>% group_by(animal_id, .drop =
   mutate(proportion = count/total_cells)
 ```
 
-Plot Old TG Male and Old Ntg Male microglia−4 and microglia-5
+Plot sig comparisons (microglia−4 and microglia-5)
 ```{r}
 library(ggsignif)
 
-#bar 1 coords x: .75 - 1.75 @ y = .3
-#bar 2 coords x: 1.25 - 2.25 @ y = .4
 microglia_proportions$sex_age_genotype = factor(interaction(microglia_proportions$sex,microglia_proportions$age,microglia_proportions$genotype, sep = "/"), levels = c("Male/6/Ntg", "Male/6/5XFAD","Male/14/Ntg", "Male/14/5XFAD","Female/6/Ntg", "Female/6/5XFAD","Female/14/Ntg", "Female/14/5XFAD"))
 
 # Function to extract FDR-corrected p-value and format annotation
@@ -199,8 +194,6 @@ get_pvalue_annotation <- function(comparison, cluster_name, results_df) {
   contrast_name <- contrast_lookup[[comp_key]]
   
   if (is.null(contrast_name)) {
-    # Debug: uncomment to see which comparison failed to match
-    # cat("Warning: No contrast found for comparison:", paste(comparison, collapse=" vs "), "| Key:", comp_key, "\n")
     return("NS")
   }
   
@@ -213,8 +206,6 @@ get_pvalue_annotation <- function(comparison, cluster_name, results_df) {
     return("")
   }
   
-  # Try different possible column names for FDR-corrected p-value
-  # Common sccomp column names: c_FDR, p_adjusted, p.adjusted, FDR, padj
   p_adj_sccomp = result_row[["adj_p_val_sccomp"]]
   
   # Format annotation

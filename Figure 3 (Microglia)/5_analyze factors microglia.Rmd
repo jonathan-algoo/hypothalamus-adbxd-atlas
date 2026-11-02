@@ -121,7 +121,7 @@ contrasts_list = list(
 
 Aggregate factor scores by animal, then test associations
 ```{r}
-# Aggregate factor scores by cluster and animal
+# Aggregate factor scores per animal
 factor_scores_aggregated = scired_scores %>%
   group_by(animal_id) %>%
   summarise(
@@ -147,10 +147,10 @@ Test associations between each contrast and each factor
 #add factor (ex: Factor_1 ~ base formula)
 factor_scores_aggregated$age_genotype = paste0(factor_scores_aggregated$age, "_", factor_scores_aggregated$genotype)
 factor_scores_aggregated$age_genotype = as.factor(factor_scores_aggregated$age_genotype)
+#relevel so Male is ref
 factor_scores_aggregated$sex = factor(factor_scores_aggregated$sex, levels = c("Male","Female"))
 factor_scores_aggregated$sex_age_genotype = paste0(factor_scores_aggregated$sex, "_", factor_scores_aggregated$age_genotype)
 
-#relevel so Male is ref
 factor_scores_aggregated$strain = as.factor(factor_scores_aggregated$strain)
 
 formula_to_test_base = "~ age_genotype + age_genotype:sex + 0 + (1|strain)"
@@ -212,10 +212,8 @@ final_association_table_amyloid_sig %>% write_csv("significant factor associatio
 
 Evaluate factors for prolonged amyloid male, prolonged amyloid female, early amyloid male, early amyloid female, "effect_of_sex_old_5x, effect_of_sex_young_5x
 
-
-
 Get UMAP coords for each microglia cell, and overlay with colors of factors.
-Plot distribution of each factor on UMAP (color by z scored log cpm)
+Plot distribution of each factor on UMAP 
 ```{r}
 # Load UMAP coordinates
 umap_coords = readRDS("./microglia_umap_coords.rds")
@@ -230,7 +228,6 @@ for(factor in factor_names) {
   scired_scores_umap[[col_name]] = scale(scired_scores_umap[[factor]])[, 1]
   scired_scores_umap[[col_name]][scired_scores_umap[[col_name]] > 5] <- 5
   scired_scores_umap[[col_name]][scired_scores_umap[[col_name]] < -5] <- -5
-  #set max value to 10
 }
 ```
 
@@ -278,13 +275,11 @@ p = ggplot(scired_scores_umap, aes(x = UMAP1, y = UMAP2, color = cluster)) +
 
 combined_plot_list = c(list(p + guides(color = guide_legend(override.aes = list(size = 4)))), factor_plots) # Add the original UMAP plot to the beginning of the list
 
-# Combine all plots in a 10x5 grid (10 columns, 5 rows for 50 factors)
 combined_plot = wrap_plots(combined_plot_list, ncol = 8, nrow = 7) 
 
 # Save the combined plot
 ggsave("microglia_factors_umap_all.pdf", combined_plot, 
        width = 40, height = 20, limitsize = F, units = "in")
-#plot factor 2 to highlight it, which marks a distinct subtype, the interferon associated subtype. Use same dimensions as plot of UMAP (10 x 10)
 ```
 
 Plot UMAP of Factor 13
@@ -308,7 +303,7 @@ ggsave("microglia_factor13_umap_cluster.pdf", f13_plot,
 
 Plot factor 13 male and female contrasts
 ```{r}
-# Aggregate factor scores by cluster and animal
+# Aggregate factor scores per animal
 factor_scores_aggregated = scired_scores %>%
   group_by(animal_id) %>%
   summarise(
@@ -364,8 +359,6 @@ get_pvalue_annotation_factors <- function(comparison, results_df) {
   contrast_name <- contrast_lookup[[comp_key]]
   
   if (is.null(contrast_name)) {
-    # Debug: uncomment to see which comparison failed to match
-    # cat("Warning: No contrast found for comparison:", paste(comparison, collapse=" vs "), "| Key:", comp_key, "\n")
     return("NA")
   }
   
@@ -377,8 +370,6 @@ get_pvalue_annotation_factors <- function(comparison, results_df) {
     return("NA")
   }
   
-  # Try different possible column names for FDR-corrected p-value
-  # Common sccomp column names: c_FDR, p_adjusted, p.adjusted, FDR, padj
   p_adj <- NULL
   if ("adj.p.value" %in% names(result_row)) {
     p_adj <- result_row$adj.p.value[1]
@@ -411,7 +402,7 @@ comparisons_list <- list(
   c("Male/14/5XFAD", "Female/14/5XFAD")
 )
 
-# Get annotations for microglia-4
+# Get annotations
 annotations_f13 <- sapply(comparisons_list, function(comp) {
   get_pvalue_annotation_factors(comp, f13_results)
 })

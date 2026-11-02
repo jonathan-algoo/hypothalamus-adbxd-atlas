@@ -21,7 +21,7 @@ animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "
 #load animal phenotype data
 animal_phenotype_data = read.csv("./calo_bx_data_clean_20260501.csv")
 
-#filter to just < 14 and chow diet
+#filter to just <= 14 and chow diet
 animal_phenotype_data = animal_phenotype_data %>% filter(AgeGrp <= 14) %>% filter(Diet == "Chow")
 
 animal_phenotype_data_ge_mice = animal_phenotype_data 

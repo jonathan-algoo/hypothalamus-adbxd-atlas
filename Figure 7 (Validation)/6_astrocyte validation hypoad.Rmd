@@ -633,27 +633,9 @@ prop_plot_df <- cluster_counts %>%
          cluster = factor(astrocyte_mapped_cluster,
                           levels = str_sort(unique(astrocyte_mapped_cluster), numeric = TRUE)))
 
-# 
-# 
-# 
-# 
-# # --- panel A: all clusters ----------------------------------------------------
-# p_all <- ggplot(prop_plot_df, aes(x = cluster, y = proportion, fill = ad)) +
-#   geom_boxplot(outlier.size = 0.8, position = position_dodge(width = 0.75), alpha = 0.7) +
-#   geom_point(aes(group = ad), position = position_dodge(width = 0.75),
-#              size = 1, alpha = 0.5) +
-#   scale_fill_manual(values = c(ctl = "#a1bad4", ad = "#f6b2ba"), name = "Condition") +
-#   labs(x = "Predicted cluster", y = "Proportion of astrocytes per donor") +
-#   theme_bw(base_size = 11) +
-#   theme(axis.text.x = element_text(angle = 45, hjust = 1),
-#         panel.grid.minor = element_blank())
-
 library(patchwork)
-#p_all + p_astro5 + plot_layout(widths = c(3, 1))
 
-#plot astro-5 + astro_marker_map_xgb
-
-#sccomp p
+#sccomp comp FDR
 astro5_p <- contrast_result %>%
   filter(astrocyte_mapped_cluster == "astrocyte-5") %>%
   pull(c_FDR)

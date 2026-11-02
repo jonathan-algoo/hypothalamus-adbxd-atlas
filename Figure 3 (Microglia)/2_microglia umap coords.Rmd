@@ -3,7 +3,6 @@ title: "Get microglia umap coords for visualization of clusters on umap"
 output: html_document
 date: "2025-01-25"
 ---
-further microglia clustering past just homeostatic and disease-associated (get subtypes of these two)
 
 Load libraries and functions
 ```{r}
@@ -30,7 +29,6 @@ set.seed(1)
 get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
   initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
   initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
-  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
   # Variable Gene Selection Using Seurat VST 
   variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
   variable_genes = variable_genes %>% filter(variable == T) 
@@ -51,8 +49,6 @@ get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, n
   return(pca)
 
 }
-#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
-
 
 create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
   hnsw_index <- RcppHNSW::hnsw_build(
@@ -91,13 +87,7 @@ get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, r
   set.seed(1)
   objective_function = c("modularity")
   clustered_graph= igraph::graph_from_adjacency_matrix(snn_graph, weighted = TRUE, diag = FALSE, mode = "lower") 
-  
   leiden_communities_found = clustered_graph %>% igraph::cluster_leiden(resolution = resolution, objective_function=objective_function)
-  
-  #dendro stuff start
-  
-  
-  #dendro stuff end
   leiden_communities_found %>% 
     igraph::membership() %>%
     as.factor()

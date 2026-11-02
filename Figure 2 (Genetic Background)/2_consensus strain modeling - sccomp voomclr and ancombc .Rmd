@@ -165,7 +165,7 @@ saveRDS(sccomp_results, "sccomp_results_strain.rds")
 voom clr results
 ```{r}
 library(voomCLR)
-voomclr_formula = as.formula("~strain + sex + age + genotype") #account for 1|strain using duplicateCorrelation
+voomclr_formula = as.formula("~strain + sex + age + genotype") 
 
 # Loop through each cell class
 voomclr_list_res = list()

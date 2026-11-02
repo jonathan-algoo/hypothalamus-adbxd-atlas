@@ -87,8 +87,6 @@ Create barplot number per cell class for each age/tg group
 count_data <- assignments_df %>%
   count(age_tg, cell_class) 
 
-#remove t cells and bam for aesthetics
-#count_data <- count_data %>% filter(!cell_class %in% c( "Tcells", "Bam"))
 # Create the barplot
 p <- ggplot(count_data, aes(x = cell_class, y = n, fill = cell_class)) +
   geom_bar(stat = "identity", position = "dodge") +
