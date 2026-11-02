@@ -610,6 +610,7 @@ saveRDS(combined_results, "combined_compositional_results_human_astro.rds")
 #set NAs to 1 below (not significant if not reported, relevant to sccomp but won't change anything)
 
 combined_results = readRDS("combined_compositional_results_human_astro.rds")
+#fdr adjustment, since this is a targeted validation analysis with one comparison, isn't needed; however, sccomp just gives the c_FDR, so will use c_FDR for sccomp and the unadjusted for the others
 sig_at_least_2 <- combined_results %>%
   select(-contrast) %>% #all contrasts same
   mutate(raw_p_val = case_when(
