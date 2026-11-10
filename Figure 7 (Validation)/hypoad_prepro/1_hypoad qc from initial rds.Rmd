@@ -14,7 +14,6 @@ library(harmony)
 
 hypoad_human = readRDS("./HypoAD.RDS")
 
-
 #convert all non-doublet cells > 1000 UMIs, < 100,000, < 5% mito, and non-doublet to bpcells 
 #filter for only primary data
 keep_metadata = hypoad_human@meta.data %>% filter(total_counts > 2000 & total_counts < 1e5 & pct_counts_mt < 5 & scDblFinder_class == 1 & is_primary_data)
@@ -24,14 +23,9 @@ bpcells_mat_hypoad_counts = counts_mat %>% as("IterableMatrix")
 
 bpcells_mat_hypoad_counts = bpcells_mat_hypoad_counts %>% write_matrix_dir("./hypoad_counts_bpcells_mat",overwrite = T)
 
-
 saveRDS(keep_metadata,"cell_metadata_hypoad_post_qc.rds")
-
 
 donor_metadata = distinct(keep_metadata %>% select(donor_id, age, sex_f, Braak, condition))
 
 saveRDS(donor_metadata, "donor_metadata_hypoad_post_qc.rds")
-
-
-
 ```

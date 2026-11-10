@@ -129,7 +129,7 @@ train_df_capped <- train_df %>%
   ungroup()
 
 smote_rec <- recipe(cluster ~ ., data = train_df_capped) %>%
-  step_smote(cluster, over_ratio = 1) %>%
+  step_smote(cluster, over_ratio = 1, seed = 1) %>%
   prep()
 
 train_balanced <- juice(smote_rec)
@@ -145,7 +145,9 @@ dtrain <- xgb.DMatrix(data = X_train, label = y_train_int)
 params <- list(
   objective   = "multi:softprob",
   num_class   = length(y_levels),
-  eval_metric = "mlogloss"
+  eval_metric = "mlogloss",
+  seed = 1,
+  nthread = 1
 )
 
 cv_xgb <- xgb.cv(
@@ -475,13 +477,15 @@ model <- cluster_counts %>%
     sample     = "donor_id",
     cell_group = "astrocyte_mapped_cluster",
     abundance  = "count",
-    bimodal_mean_variability_association = TRUE
+    bimodal_mean_variability_association = TRUE,
+    cores = 1,
+    mcmc_seed = 1
   )
-model <- model %>% sccomp_remove_outliers(percent_false_positive = 10)
+model <- model %>% sccomp_remove_outliers(percent_false_positive = 10, cores = 1, mcmc_seed = 1)
 
 contrast_formula = "adad"
 contrast_result <- model %>%
-    sccomp_test(contrast_formula, test_composition_above_logit_fold_change = 0)
+    sccomp_test(contrast_formula, test_composition_above_CLR_fold_change = 0)
 contrast_result$contrast <- "ad"
 ```
 
@@ -553,6 +557,7 @@ out <- ancombc2(
   assay_name  = "counts",
   fix_formula = "ad + age + pmi_hours",
   p_adj_method = "BH",
+  n_cl = 1,
   verbose     = FALSE
 )
 term_name = "adad"
@@ -698,7 +703,7 @@ animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../shared objs and code/calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 

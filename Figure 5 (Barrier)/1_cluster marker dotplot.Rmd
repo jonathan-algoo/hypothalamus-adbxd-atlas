@@ -17,7 +17,7 @@ animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../shared objs and code/calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 
@@ -219,8 +219,8 @@ tanycyte_plot <- create_marker_dotplot(
 
 
 vascular_rename <- c(
-  "Vascular-Endothelial_1" = "Endothelial-1 (*Cav1*/*Ctla2a* Veins)", 
-  "Vascular-Endothelial_2" = "Endothelial-2 (*Gkn3* Arteries)",
+  "Vascular-Endothelial_1" = "Endothelial-1 (*Cav1*/*Ctla2a* Arteries)", 
+  "Vascular-Endothelial_2" = "Endothelial-2 (*Gkn3* Veins)",
   "Vascular-Endothelial_3" = "Endothelial-3 (*Plvap*/*Col15a1*/*Exoc3l2* Fenestrated)",
   "Vascular-Pericytes"     = "Pericytes (*Rgs5*/*Kcnj8*)",
   "Vascular-Smc"           = "SMC (*Myh11*/*Acta2*)"

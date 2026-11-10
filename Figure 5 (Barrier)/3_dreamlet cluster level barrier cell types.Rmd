@@ -5,7 +5,7 @@ date: "2026-09-14"
 ---
 
 ```{r}
-set.seed(1) #added 9/14
+set.seed(1)
 library(dreamlet)
 library(tidyverse)
 library(zellkonverter)
@@ -13,7 +13,7 @@ library(SingleCellExperiment)
 library(BiocParallel)
 
 # Set up parallel processing with 8 cores
-bpparam <- MulticoreParam(workers = 8)
+bpparam <- MulticoreParam(workers = 8,RNGseed = 1)
 mm_formula = "~ age_genotype + age_genotype:sex + 0 + (1|strain)" %>% as.formula()
 
 #list of model contrasts

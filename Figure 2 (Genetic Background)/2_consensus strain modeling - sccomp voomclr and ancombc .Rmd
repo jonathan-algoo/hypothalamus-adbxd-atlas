@@ -17,7 +17,7 @@ animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../shared objs and code/calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 
@@ -146,10 +146,12 @@ for(i in seq_along(cluster_counts_per_class)) {
       sample = "animal_id",
       cell_group = "cluster",
       abundance = "count",
-      bimodal_mean_variability_association = T
+      bimodal_mean_variability_association = T,
+      cores = 1,
+      mcmc_seed = 1
     ) 
-  model = model %>% sccomp_remove_outliers(percent_false_positive = 10)
-  contrast_result = model %>% sccomp_test(test_composition_above_logit_fold_change = 0)
+  model = model %>% sccomp_remove_outliers(percent_false_positive = 10, cores = 1, mcmc_seed = 1)
+  contrast_result = model %>% sccomp_test(test_composition_above_CLR_fold_change = 0)
   contrast_result$class = cur_class
   contrast_result = contrast_result %>% filter(grepl("strain",parameter))
   # Store the combined model results
@@ -253,7 +255,7 @@ for (class_name in names(cluster_counts_per_class)) {
       assay_name = "counts",
       fix_formula = "strain + age + sex + genotype",
       p_adj_method = "none", 
-      n_cl = 8,
+      n_cl = 1,
       verbose = FALSE
     )
     

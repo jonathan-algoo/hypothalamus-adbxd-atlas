@@ -306,7 +306,7 @@ compute_all_pheno_changes <- function(full_pheno_dset, phenotype_vars, age_val, 
     pivot_longer(cols = all_of(phenotype_vars), names_to = "variable", values_to = "value") %>%
     pivot_wider(names_from = Genotype, values_from = value) %>%
     mutate(change = `5XFAD` - Ntg) %>%
-    select(strain, sex = Sex, variable, change) %>%
+    dplyr::select(strain, sex = Sex, variable, change) %>%
     pivot_wider(names_from = variable, values_from = change)
 
   # percent change only for Weight
@@ -314,12 +314,12 @@ compute_all_pheno_changes <- function(full_pheno_dset, phenotype_vars, age_val, 
     # need original Ntg mean to compute pct
     ntg_weight <- agg %>%
       filter(Genotype == "Ntg") %>%
-      select(strain, sex = Sex, ntg_weight = Weight)
+      dplyr::select(strain, sex = Sex, ntg_weight = Weight)
 
     changes <- changes %>%
       left_join(ntg_weight, by = c("strain", "sex")) %>%
       mutate(Weight_pct = (Weight / ntg_weight) * 100) %>%
-      select(-ntg_weight)
+      dplyr::select(-ntg_weight)
   }
 
   changes
@@ -357,7 +357,7 @@ for (comp in comparison_sets) {
 
     # Attach phenotype change to expression changes for this variable
     expr_change <- cur_5x_vs_ntg_expr_change %>%
-      left_join(pheno_changes_14 %>% select(strain, sex, pheno_val = all_of(cor_col)),
+      left_join(pheno_changes_14 %>% dplyr::select(strain, sex, pheno_val = all_of(cor_col)),
                 by = c("strain", "sex")) %>%
       filter(!is.na(pheno_val), !is.na(log_expr_change))
     

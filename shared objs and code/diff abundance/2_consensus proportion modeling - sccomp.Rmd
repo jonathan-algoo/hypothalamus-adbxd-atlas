@@ -1,7 +1,7 @@
 ---
 title: "consensus proportion modeling - sccomp"
 output: html_document
-date: "2025-07-22"
+date: "2026-11-03"
 ---
 
 
@@ -20,7 +20,7 @@ animal_metadata = readr::read_csv("../mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 
@@ -140,8 +140,6 @@ animal_metadata = animal_metadata %>%
   mutate(age_genotype = interaction(age, genotype,sep = "_"))
 #levels: young_Ntg old_5XFAD young_5XFAD old_Ntg
 
-#create variable denoting sex 
-
 # Define the formula as a formula object
 sccomp_formula = as.formula("~ age_genotype + age_genotype:sex + 0 + (1|strain)")
 
@@ -154,16 +152,6 @@ aging_contrast_m = "age_genotypeold_Ntg - age_genotypeyoung_Ntg"
 prolonged_amyloid_contrast_f = "(age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`)"
 early_amyloid_contrast_f = "(age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
 aging_contrast_f = "(age_genotypeold_Ntg +`age_genotypeold_Ntg:sexFemale`)  - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`)"
-
-#evaluate whether the slope changes between AD and control
-#(Change in AD) - (Change in Ntg)
-slope_change_ad_control_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD) - (age_genotypeold_Ntg - age_genotypeyoung_Ntg)"
-#(Change in AD Female) - (Change in Ntg Female)
-#(AD Female Old - AD female young) - (Control Female Old - Control Female young)
-slope_change_ad_control_contrast_f = "((age_genotypeold_5XFAD + `age_genotypeold_5XFAD:sexFemale`) - (age_genotypeyoung_5XFAD + `age_genotypeyoung_5XFAD:sexFemale`)) - ((age_genotypeold_Ntg + `age_genotypeold_Ntg:sexFemale`) - (age_genotypeyoung_Ntg + `age_genotypeyoung_Ntg:sexFemale`))"
-
-#3 way interaction - 
-sex_effect_on_slope_difference_between_ad_control_contrast = paste0(slope_change_ad_control_contrast_m,"- (",slope_change_ad_control_contrast_f,")")
 
 late_vs_early_amyloid_contrast_m = "(age_genotypeold_5XFAD - age_genotypeyoung_5XFAD)"
 
@@ -221,9 +209,11 @@ for(i in seq_along(cluster_counts_per_class)) {
       sample = "animal_id",
       cell_group = "cluster",
       abundance = "count",
-      bimodal_mean_variability_association = T
+      bimodal_mean_variability_association = T,
+      cores = 1,
+      mcmc_seed = 1
     ) 
-  model = model %>% sccomp_remove_outliers(percent_false_positive = 10)
+  model = model %>% sccomp_remove_outliers(percent_false_positive = 10, cores = 1,mcmc_seed = 1)
   
   # Initialize list to store results for each contrast
   contrast_results_list = vector(mode = "list", length = length(contrasts_list))
@@ -235,7 +225,7 @@ for(i in seq_along(cluster_counts_per_class)) {
     contrast_formula = contrasts_list[[j]]
     
     # Test the contrast
-    contrast_result = model %>% sccomp_test(contrast_formula,test_composition_above_logit_fold_change = 0)
+    contrast_result = model %>% sccomp_test(contrast_formula,test_composition_above_CLR_fold_change = 0)
     
     # Add contrast name to the result
     contrast_result$contrast = contrast_name
@@ -261,7 +251,10 @@ for (class_name in names(sccomp_class_results_list)) {
   results_list <- append(results_list, list(current_model_results))
 }
 sccomp_results <- bind_rows(results_list)
+```
 
+
+```{r}
 saveRDS(sccomp_results, "sccomp_prop_results.rds")
 ```
 

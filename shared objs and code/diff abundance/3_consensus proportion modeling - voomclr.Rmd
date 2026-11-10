@@ -1,7 +1,7 @@
 ---
 title: "consensus proportion modeling - voomclr"
 output: html_document
-date: "2025-07-22"
+date: "2026-11-03"
 ---
 
 
@@ -20,7 +20,7 @@ animal_metadata = readr::read_csv("../mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 
@@ -139,8 +139,6 @@ animal_metadata$animal_id = paste0("animal_", animal_metadata$animal_id) %>% as.
 animal_metadata = animal_metadata %>%
   mutate(age_genotype = interaction(age, genotype,sep = "_"))
 #levels: young_Ntg old_5XFAD young_5XFAD old_Ntg
-
-#create variable denoting sex 
 
 # Define the formula as a formula object
 sccomp_formula = as.formula("~ age_genotype + age_genotype:sex + 0 + (1|strain)")
@@ -285,7 +283,10 @@ voomclr_results_df = voomclr_results_df %>%
   group_by(contrast, cell_class) %>%
   mutate(adj.P.Val = p.adjust(P.Value, method = "BH")) %>%
   ungroup()
+```
 
+
+```{r}
 saveRDS(voomclr_results_df, "voomclr_prop_results.rds")
 ```
 

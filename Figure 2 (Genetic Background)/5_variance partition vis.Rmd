@@ -7,11 +7,6 @@ date: "2026-01-29"
 
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  echo = TRUE,
-  message = FALSE,
-  warning = FALSE
-)
 
 library(dplyr)
 library(tidyr)
@@ -37,12 +32,14 @@ full_var_part_df_strain = full_var_part_list %>% bind_rows()
 
 
 ```{r shared_high_strain_genes, echo=TRUE}
-#Include genes with >10% strain explained variance (strain > 0.1)
+#Include genes with >30% strain explained variance (strain > 0.3)
 high_strain_genes <- full_var_part_df_strain %>%
-  filter(strain > 0.1)
-num_genes_per_class = high_strain_genes$class %>% table %>% as.data.frame.table() %>% rename("class" = ".") %>% rename("num_genes" = "Freq")
+  filter(strain > 0.3)
+num_genes_per_class = high_strain_genes$class %>% table %>% as.data.frame.table() %>% dplyr::rename("class" = ".") %>% dplyr::rename("num_genes" = "Freq")
 library(readr)
 num_genes_per_class %>% write_csv("variance_partition_num_genes_per_class.csv")
+num_genes_per_class %>% write_csv("../supplementary tables/Supplementary Table 2.csv")
+
 
 num_classes_gene <- high_strain_genes %>%
   group_by(gene) %>%
@@ -55,14 +52,18 @@ num_classes_gene <- high_strain_genes %>%
 write.csv(
   num_classes_gene, 
   "./variance_partition_high_strain_genes_and_classes.csv")
+
+#supp table 3
+num_classes_gene %>% write_csv("../supplementary tables/Supplementary Table 1")
+
 # Identify genes appearing in 3 or more classes
 shared_genes_3plus <- num_classes_gene %>%
   filter(n_classes >= 3)
 
-# Display the number of genes shared across 3 or more classes at >10% strain variance
-cat("Number of genes with >10% strain variance explained found in 3 or more classes:", nrow(shared_genes_3plus), "\n")
+# Display the number of genes shared across 3 or more classes at >30% strain variance
+cat("Number of genes with >30% strain variance explained found in 3 or more classes:", nrow(shared_genes_3plus), "\n")
 
-# Optionally, plot number of genes binned by number of classes (for overview)
+# plot number of genes binned by number of classes (for overview)
 num_genes_variance_plot = ggplot(num_classes_gene, aes(x = n_classes)) +
   geom_bar(fill = "#0571b0") +
   geom_text(
@@ -73,9 +74,9 @@ num_genes_variance_plot = ggplot(num_classes_gene, aes(x = n_classes)) +
   ) +
   scale_x_continuous(breaks = seq(1, max(num_classes_gene$n_classes), 1)) +
   labs(
-    x = "Number of classes gene appears in (> 10% strain variance)",
+    x = "Number of classes gene appears in (> 30% strain variance)",
     y = "Number of genes",
-    title = "Distribution of genes by number of classes with\n> 10% strain variance explained"
+    title = "Distribution of genes by number of classes with\n> 30% strain variance explained"
   ) +
   theme_minimal(base_size = 12)
 
@@ -94,7 +95,7 @@ library(stringr)
 
 gene_class_matrix <- high_strain_genes %>%
   distinct(gene, class) %>%
-  mutate(class = str_to_title(class)) %>%
+  mutate(class = str_to_title(class)) %>% 
   mutate(present = 1) %>%
   pivot_wider(names_from = class, values_from = present, values_fill = 0) %>%
   column_to_rownames("gene") %>%
@@ -119,16 +120,16 @@ aligned_set_sizes <- full_set_sizes[set_name(comb_mat_filtered)]
 
 # 5. Build the left annotation using the aligned sizes
 l_annot <- rowAnnotation(
-  "Set Size" = anno_barplot(
+  " " = anno_barplot( #don't label x-axis since it's self-descriptive
     aligned_set_sizes,
     border = FALSE,
     gp = gpar(fill = "black"),
     width = unit(4, "cm"),
-    ylim = c(0, 75),
+    ylim = c(0, 175),
     axis_param = list(
       direction = "reverse",
-      at = c(0, 25, 50, 75),
-      labels = c("0", "25", "50", "75")
+      at = c(0, 25, 50, 75,100,125,150),
+      labels = c("0", "25", "50", "75","100","125", "150")
     )
   ),
   annotation_name_side = "bottom"
@@ -150,22 +151,16 @@ upset_plot <- UpSet(
 pdf("./num_genes_shared_across_classes_upset.pdf", width = 10, height = 4)
 draw(upset_plot)
 dev.off()
-
-draw(upset_plot)
 ```
-
-
-
-
 
 Plot heatmap
 ```{r}
-#only keep genes with strain higher than 20% explained var (strain > .2)
+#only keep genes with strain higher than 30% explained var (strain > .3)
 full_var_part_list = list()
 for(i in 1:length(all_results)) {
   cur_class = names(all_results)[i]
   cur_df = all_results[[i]]$variance_df
-  cur_df = cur_df %>% filter(strain > .2)
+  cur_df = cur_df %>% filter(strain > .3)
   full_var_part_list[[cur_class]] = cur_df
 }
 full_var_part_df_strain = full_var_part_list %>% bind_rows()
@@ -245,7 +240,7 @@ strain_cluster_matrix <- strain_order_df %>%
 
 strain_hclust <- hclust(dist(strain_cluster_matrix))
 strain_order <- strain_hclust$labels[strain_hclust$order]
-strain_order <- c("B6", setdiff(strain_order, "B6"))
+strain_order <- c("B6", "B6xD2Gpnmb",setdiff(strain_order, c("B6","B6xD2Gpnmb")))
 
 animal_order <- heatmap_tidy_data %>%
   select(animal_id, strain, sex, age, genotype) %>%
@@ -282,12 +277,19 @@ annotation_long <- heatmap_tidy_data %>%
   )
 
 # Create the annotation plot
+annotation_long = annotation_long %>% 
+  mutate(value = case_when(
+    value == "young" ~ "Young",
+    value == "old" ~ "Old",
+    .default = value
+  ))
+
 annotation_plot <- ggplot(annotation_long, aes(x = animal_id, y = category, fill = value)) +
   geom_tile(color = "white", linewidth = 0.2) +
   facet_grid(~ strain, scales = "free_x", space = "free_x") +
   scale_fill_manual(
     values = okabe_ito_palette,
-    guide = guide_legend(title.position = "top", keywidth = 0.5, keyheight = 0.5)
+    guide = guide_legend(nrow = 3, title.position = "top", keywidth = 0.5, keyheight = 0.5)
   ) +
   scale_y_discrete(limits = rev(c("sex", "age", "genotype"))) +
   theme_void() +
@@ -303,6 +305,14 @@ annotation_plot <- ggplot(annotation_long, aes(x = animal_id, y = category, fill
 
 library(tidyverse)
 heatmap_tidy_data$class = str_to_title(heatmap_tidy_data$class)
+heatmap_tidy_data = heatmap_tidy_data %>%
+  mutate(class = case_when(
+    class == "Vlmc" ~ "VLMC",
+    class == "Opc" ~ "OPC",
+    class == "Gabaergic" ~ "GABAergic",
+    .default = class
+  )) 
+library(forcats)
 # Create the main heatmap plot
 heatmap_plot <- ggplot(heatmap_tidy_data, aes(x = animal_id, y = gene, fill = scaled_expression)) +
   geom_tile(color = "white", linewidth = 0.1) +
@@ -319,13 +329,13 @@ heatmap_plot <- ggplot(heatmap_tidy_data, aes(x = animal_id, y = gene, fill = sc
   theme(
     axis.text.x = element_blank(),
     axis.ticks.x = element_blank(),
+    axis.text.y = element_text(face = "italic"),
     panel.grid = element_blank(),
     strip.text.y.left = element_text(angle = 0, face = "bold", size = 14),
     strip.text.x = element_text(face = "bold", angle = 0, hjust = .25, size = 14),
     legend.title = element_text(face = "bold", size = 14),
     legend.text = element_text(size = 12, face = "bold"),
     strip.placement = "outside",
-    # MODIFIED: Reduced spacing between strains
     panel.spacing.x = unit(0.1, "lines")
   )
 

@@ -56,7 +56,7 @@ create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_bui
     ef = ef_index_build_param,
     M = M_index_build_param,
     distance = distance_metric,
-    n_threads = n_threads
+    n_threads = n_threads 
   )
   nn_index <- RcppHNSW::hnsw_search(
     X = pc_coords,
@@ -95,7 +95,7 @@ get_leiden_clustering_graph_results_from_igraph_function = function(snn_graph, r
 
 
 calculate_umap_coords <- function(pcs, cluster_assignments_vector) {
-  umap_coords <- uwot::umap(pcs)
+  umap_coords <- uwot::umap(pcs,n_threads = 1,n_sgd_threads = 1)
   umap_coords = umap_coords %>% as.data.frame()
   umap_coords = umap_coords %>% dplyr::rename("UMAP1" = "V1", "UMAP2" = "V2")
   

@@ -40,16 +40,16 @@ for(cur_cluster in clusters) {
     cur_genelist <- sort(cur_genelist, decreasing = TRUE)
     
     cur_fgsea = gseGO(geneList = cur_genelist,
-                          OrgDb = org.Mm.eg.db,
-                          ont = "BP",
-                          keyType = "SYMBOL",
-                          pAdjustMethod = "BH",
-                          pvalueCutoff = 1,#don't remove any 
-                          by = "fgsea",
-                          nPermSimple = 50000,
-                          seed = TRUE,
-                          eps = 1e-50,
-                          verbose = FALSE)
+                        OrgDb = org.Mm.eg.db,
+                        ont = "BP",
+                        keyType = "SYMBOL",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 1,#don't remove any
+                        by = "fgsea",
+                        nPermSimple = 50000,
+                        seed = TRUE,
+                        eps = 1e-50,
+                        verbose = FALSE)
     
     if (nrow(as.data.frame(cur_fgsea)) > 0) {
         gsea_results_list[[i]] <- cur_fgsea %>%

@@ -67,7 +67,7 @@ create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_bui
     ef = ef_index_build_param,
     M = M_index_build_param,
     distance = distance_metric,
-    n_threads = n_threads
+    n_threads = 1
   )
   nn_index <- RcppHNSW::hnsw_search(
     X = pc_coords,
@@ -168,11 +168,11 @@ mic_markers = get_lognorm_markers(cluster_assignments = micro_clusters, non_norm
 ```
 
 Because of randomness from clustering, may need to change this number on each run
-microglia-2 = BAMs/PVMs (F13A1/LYVE1)
+microglia-5 = BAMs/PVMs (F13A1/LYVE1)
 ```{r}
 #remove microglia-5 (Border associated macrophages/BAMs/PVMs), and recluster
-bam_cells = micro_clusters$new_assignments[micro_clusters$new_assignments == "microglia-2"] %>% names
-mic_cells = micro_clusters$new_assignments[micro_clusters$new_assignments != "microglia-2"]
+bam_cells = micro_clusters$new_assignments[micro_clusters$new_assignments == "microglia-5"] %>% names
+mic_cells = micro_clusters$new_assignments[micro_clusters$new_assignments != "microglia-5"]
 
 cell_meta_2 = cell_meta[names(mic_cells),]
 ```

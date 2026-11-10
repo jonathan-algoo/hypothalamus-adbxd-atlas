@@ -4,8 +4,6 @@ output: html_document
 date: "2025-03-31"
 ---
 
-Last ran Feb 25, 2026
-
 Cell class numbers (glia and neurons, split by sex, and shown as a bar plot)
 
 Load libraries

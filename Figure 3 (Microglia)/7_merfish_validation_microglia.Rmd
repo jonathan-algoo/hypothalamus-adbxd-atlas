@@ -127,9 +127,9 @@ get_pcs_no_var_genes = function(initial_ge_matrix, nthreads = 8, npcs = 30) {
   return(pca)
 
 }
-pcs_micro= get_pcs_no_var_genes(joint_ge, npcs = 20)
+pcs_micro= get_pcs_no_var_genes(joint_ge, npcs = 20,nthreads = 1)
 
-harmony_micro = RunHarmony(pcs_micro,meta_data = joint_meta$tech)
+harmony_micro = RunHarmony(pcs_micro,meta_data = joint_meta$tech,ncores = 1)
 ```
 
 
@@ -167,7 +167,7 @@ train_df_capped <- train_df %>%
   ungroup()
 
 smote_rec <- recipe(cluster ~ ., data = train_df_capped) %>%
-  step_smote(cluster, over_ratio = 1) %>%
+  step_smote(cluster, over_ratio = 1,seed = 1) %>%
   prep()
 
 train_balanced <- juice(smote_rec)
@@ -183,7 +183,9 @@ dtrain <- xgb.DMatrix(data = X_train, label = y_train_int)
 params <- list(
   objective   = "multi:softprob",
   num_class   = length(y_levels),
-  eval_metric = "mlogloss"
+  eval_metric = "mlogloss",
+  seed = 1,
+  nthread = 1
 )
 
 cv_xgb <- xgb.cv(
@@ -271,7 +273,7 @@ full_df_capped <- full_df %>%
   ungroup()
 
 full_balanced <- recipe(cluster ~ ., data = full_df_capped) %>%
-  step_smote(cluster, over_ratio = 1) %>%
+  step_smote(cluster, over_ratio = 1,seed = 1) %>%
   prep() %>%
   juice()
 
@@ -283,6 +285,7 @@ rf_final <- ranger(
   x = X_full,
   y = y_full,
   probability = TRUE,
+  num.threads = 1,
   seed = 501
 )
 
@@ -450,13 +453,14 @@ model <- cluster_counts %>%
     sample     = "animal_id",
     cell_group = "cluster",
     abundance  = "count",
-    bimodal_mean_variability_association = TRUE
+    bimodal_mean_variability_association = TRUE,
+    cores = 1, mcmc_seed = 1
   )
-model <- model %>% sccomp_remove_outliers(percent_false_positive = 10)
+model <- model %>% sccomp_remove_outliers(percent_false_positive = 10, cores = 1, mcmc_seed = 1)
 
 contrast_formula = "fadFAD"
 contrast_result <- model %>%
-    sccomp_test(contrast_formula, test_composition_above_logit_fold_change = 0)
+    sccomp_test(contrast_formula, test_composition_above_CLR_fold_change = 0)
 
 ```
 
@@ -514,7 +518,8 @@ out <- ancombc2(
   fix_formula  = "fad + sex",
   p_adj_method = "BH",
   prv_cut      = 0,        # keep every cluster; there are only a handful
-  verbose      = FALSE
+  verbose      = FALSE,
+  n_cl = 1
 )
 
 ancombc_results <- out$res |>

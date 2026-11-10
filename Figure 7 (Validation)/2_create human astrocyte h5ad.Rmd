@@ -6,12 +6,16 @@ date: "2026-08-21"
 
 Cluster human astrocytes, and create h5ad
 ```{r}
+
 library(Seurat)
 library(tidyverse)
 library(ggplot2)
 library(BPCells)
 library(khroma)
 library(harmony)
+library(reticulate)
+use_condaenv("scired", required = TRUE)
+
 astro_ge = open_matrix_dir("./hypoad_prepro/hypoad_counts_bpcells_mat/")
 cell_meta = readRDS("./hypoad_prepro/cell_metadata_hypoad_post_qc.rds")
 set.seed(1)
@@ -21,7 +25,6 @@ astro_ge = astro_ge[,rownames(cell_meta)]
 get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
   initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
   initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
-  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
   # Variable Gene Selection Using Seurat VST 
   variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
   variable_genes = variable_genes %>% filter(variable == T) 
@@ -30,11 +33,8 @@ get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, n
   gene_means <- variable_genes$mean
   gene_std <- variable_genes$standard_deviation
   initial_ge_matrix <- initial_ge_matrix[variable_genes$gene,]
-  #write to disk before breaking sparsity via z-score
   preprocessed_ge = initial_ge_matrix %>% write_matrix_dir(tempfile("mat"), overwrite = T)
-  #z-score
   preprocessed_ge <- (preprocessed_ge - gene_means) / gene_std
-  #calculate 30 PCs 
   svd <- BPCells::svds(preprocessed_ge, k = npcs, threads = nthreads)
   pca <- multiply_cols(svd$v, svd$d)
   rownames(pca) = colnames(preprocessed_ge)
@@ -42,8 +42,6 @@ get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, n
   return(pca)
 
 }
-#finds pcs after log normalization + z-scoring to get relative variance of gene in relation to distribution of that gene in the dataset
-
 
 create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_build_param = 100, ef_index_build_param = 200, ef_index_search_param = 200, distance_metric = "euclidean", n_threads = 8) {
   hnsw_index <- RcppHNSW::hnsw_build(
@@ -51,7 +49,7 @@ create_snn_graph_from_pcs <- function(pc_coords, knns_returned = 20, M_index_bui
     ef = ef_index_build_param,
     M = M_index_build_param,
     distance = distance_metric,
-    n_threads = n_threads
+    n_threads = 1
   )
   nn_index <- RcppHNSW::hnsw_search(
     X = pc_coords,
@@ -135,10 +133,7 @@ subcluster_cells = function(ge_mat, cur_cluster_name, modularity_threshold = .9,
 
 
 ```{r}
-astro_clusters = subcluster_cells(astro_ge,"astrocyte")
-
-
-
+astro_clusters = subcluster_cells(astro_ge,"astrocyte") #checked for contamination
 get_lognorm_markers = function(cluster_assignments, non_norm_ge) {
   assignments = cluster_assignments$new_assignments
   non_norm_ge = non_norm_ge[,names(assignments)]
@@ -164,20 +159,16 @@ rownames(astro_meta) = astro_meta$cell_id
 
 astro_ge = astro_ge[,astro_meta$cell_id]
 
-
 astro_meta$nUMIs = colSums(astro_ge)
 #create h5ad object
 var_metadata <- data.frame(gene = rownames(astro_ge))
 rownames(var_metadata) <- var_metadata$gene
-
 astro_anndata_obj <- anndata::AnnData(
   X = NULL, 
   obs = astro_meta, 
   var = var_metadata, 
   shape = c(ncol(astro_ge), nrow(astro_ge))
 )
-
-# Write anndata to h5ad
 #save astrocyte with var genes only
 anndata::write_h5ad(anndata = astro_anndata_obj, filename = "./human-astrocyte.h5ad")
 BPCells::write_matrix_anndata_hdf5(mat = astro_ge, path = "./human-astrocyte.h5ad", group = "X", gzip_level = 9)

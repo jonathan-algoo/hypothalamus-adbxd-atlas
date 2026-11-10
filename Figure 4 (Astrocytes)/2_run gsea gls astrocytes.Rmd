@@ -46,13 +46,13 @@ for (contrast in comparisons_of_interest) {
                         ont = "BP",
                         keyType = "SYMBOL",
                         pAdjustMethod = "BH",
-                        pvalueCutoff = 1,#don't remove any 
+                        pvalueCutoff = 1,#don't remove any
                         by = "fgsea",
                         nPermSimple = 50000,
                         seed = TRUE,
                         eps = 1e-50,
                         verbose = FALSE)
-  
+
   if (nrow(as.data.frame(cur_fgsea)) > 0) {
     gsea_results_list[[contrast]] <- cur_fgsea %>%
       as.data.frame() %>%

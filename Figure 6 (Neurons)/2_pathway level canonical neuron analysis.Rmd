@@ -34,18 +34,19 @@ for(cur_cluster in clusters_of_interest) {
     cur_genelist <- cur_data_contrast$logFC
     names(cur_genelist) <- cur_data_contrast$gene
     cur_genelist <- sort(cur_genelist, decreasing = TRUE)
-    
     cur_fgsea = gseGO(geneList = cur_genelist,
-                          OrgDb = org.Mm.eg.db,
-                          ont = "BP",
-                          keyType = "SYMBOL",
-                          pAdjustMethod = "BH",
-                          pvalueCutoff = 1,#don't remove any 
-                          by = "fgsea",
-                          nPermSimple = 50000,
-                          seed = TRUE,
-                          eps = 1e-50,
-                          verbose = FALSE)
+                        OrgDb = org.Mm.eg.db,
+                        ont = "BP",
+                        keyType = "SYMBOL",
+                        pAdjustMethod = "BH",
+                        pvalueCutoff = 1,#don't remove any
+                        by = "fgsea",
+                        nPermSimple = 50000,
+                        seed = TRUE,
+                        eps = 1e-50,
+                        verbose = FALSE)
+    
+    
     gsea_results_list[[cur_cluster]][[contrast]] <- cur_fgsea %>%
         as.data.frame() %>%
         mutate(contrast = contrast) %>% 
@@ -53,12 +54,12 @@ for(cur_cluster in clusters_of_interest) {
   }
   
 }
+
 all_gsea_results <- bind_rows(
   lapply(names(gsea_results_list), function(cluster) {
     bind_rows(gsea_results_list[[cluster]])
   })
 )
-
 
 saveRDS(all_gsea_results, "gsea_results_canonical_neurons.rds") 
 

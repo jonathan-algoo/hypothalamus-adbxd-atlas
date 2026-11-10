@@ -1,5 +1,5 @@
 ---
-title: "variance partition analysis - glia"
+title: "variance partition analysis"
 output: html_document
 date: "2025-07-11"
 ---
@@ -18,6 +18,8 @@ library("limma")
 library("edgeR")
 
 set.seed(1)
+# Set up parallel processing with 8 cores
+bpparam <- MulticoreParam(workers = 8)
 
 
 #Generate cell metadata from animal-level metadata, animal-level characteristics, and cluster assignments. Perform testing and evaluation on each cell class separately.
@@ -27,7 +29,7 @@ animal_metadata = readr::read_csv("../shared objs and code/mouse_meta.csv")
 animal_metadata$ID = as.character(animal_metadata$ID)
 animal_metadata = animal_metadata %>% dplyr::select("ID", "Sex", "Line.short", "Genotype", "Age (months)") %>% dplyr::rename("age" = "Age (months)","strain" = "Line.short", "sex" = "Sex", "genotype" = "Genotype", "animal_id" = "ID")
 #load animal phenotype data
-animal_phenotype_data = read.csv("../shared objs and code/YM_CFC_BW_SM_calo_AB_individual_data_cleaned_20240826.csv")
+animal_phenotype_data = read.csv("../shared objs and code/calo_bx_data_clean_20260501.csv")
 animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_metadata$animal_id)
 #add age of death, then filter behavioral metadata for this timepoint, since some mice were phenotyped more than just prior to death. But our analysis will focus on the data collected from the timepoint prior to death. 
 
@@ -84,7 +86,7 @@ animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% p
 animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
 cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
 
-#identify animals with less than 1000 cells and remove them from dataset (low number of cells for an animal may throw off proportions)
+#identify animals with less than 1000 cells and remove them from dataset (more relevant to proportion analyses but done here for consistency; we want a good representation of cells per animal for this analysis)
 animals_less_1000_cells = cell_metadata$animal_id %>% table %>% .[. < 1000] %>% names
 cell_metadata = cell_metadata %>% filter(!animal_id %in% animals_less_1000_cells)
 cell_metadata = cell_metadata %>% droplevels()
@@ -96,7 +98,7 @@ cell_metadata =cell_metadata %>% mutate(cell_class = case_when(
 )) 
 cell_metadata$cell_class = as.factor(cell_metadata$cell_class)
 #Identify classes with only one cluster and remove from proportion analysis, since we do it by class - removed tcells, bam
-classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
+classes_one_cluster = cell_metadata %>% ungroup() %>% distinct(cluster, cell_class) %>% ungroup() %>% dplyr::count(cell_class) %>% filter(n == 1) %>% pull(cell_class)
 cell_metadata = cell_metadata %>% filter(!cell_class %in% classes_one_cluster) %>% droplevels()
 #add "animal_" to animal_id column to avoid problems with sccomp, and convert to factor; and do same for animal_metadata
 cell_metadata$animal_id = paste0("animal_",cell_metadata$animal_id) %>% as.factor() 
@@ -136,9 +138,6 @@ variance_partition_formula = ~ (1|strain) + (1|sex) + (1|genotype) + (1|age)
 class_list <- c("VLMC","astrocyte","ependymal","microglia","olig","opc","tanycyte","vascular", "Gabaergic", "Glutamatergic")
 
 all_results <- list()
-cl <- makeCluster(8)
-registerDoParallel(cl)
-
 
 #helper function - select top 5000 variable genes as subset
 get_var_genes_from_counts = function(initial_ge_matrix, n_var_genes = 5000) {
@@ -148,10 +147,24 @@ get_var_genes_from_counts = function(initial_ge_matrix, n_var_genes = 5000) {
   variable_genes = variable_genes %>% filter(variable == T) 
   rownames(variable_genes)
 }
+
 ```
 
 
 ```{r}
+
+#default for lmer fit optimizer changed to use Nelder Mead
+#was silently dropping genes using default optimizer 
+#parameters besides optimizer same as vpcontrol from variancePartition package
+vpcontrol_custom <- lme4::lmerControl(
+  calc.derivs = FALSE,
+  check.rankX = "stop.deficient",
+  check.conv.singular =
+    lme4::.makeCC("ignore", tol = 1e-4),
+  optimizer = "Nelder_Mead") #different from default, NLOPT_LN_BOBYQA
+
+
+n_threads = 8L
 for (cur_class in class_list) {
     # Filter metadata for current cell class
     cur_meta <- cell_metadata %>%
@@ -166,7 +179,8 @@ for (cur_class in class_list) {
     cur_ge_subset = cur_ge_subset[var_genes,]
     
     # Pseudobulk expression per animal/cell class (could also use mean)
-    cur_pb <- pseudobulk_matrix(cur_ge_subset, cell_groups = cur_meta$animal_id, method = "sum")
+    cur_pb <- pseudobulk_matrix(cur_ge_subset, cell_groups = cur_meta$animal_id, method = "sum", threads = n_threads)
+    
     
     # Create pseudobulk metadata df with matching columns
     pb_meta <- cur_meta %>%
@@ -179,8 +193,8 @@ for (cur_class in class_list) {
   #normalize via log1p cpm normalization
   cur_pb =  multiply_cols(cur_pb, 1/Matrix::colSums(cur_pb))
   cur_pb <- log1p(cur_pb * 1e6)
-  # Run variancePartition analysis
-  varPart <- fitExtractVarPartModel(cur_pb, variance_partition_formula, pb_meta)
+  # Run variancePartition analysis 
+  varPart <- fitExtractVarPartModel(cur_pb, variance_partition_formula, pb_meta, control =vpcontrol_custom, BPPARAM = bpparam)
   varPart$class = cur_class
   all_results[[cur_class]][["variance_df"]] = varPart %>%  as.data.frame() %>% rownames_to_column("gene") 
   all_results[[cur_class]][["norm_exp_data"]] = cur_pb
