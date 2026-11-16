@@ -59,21 +59,33 @@ p_transcriptome <- summary(anova_transcriptome)[[1]]$`Pr(>F)`[1]
 genome_plot = ggplot(animal_metadata, aes(x = strain, y = Reads_Mapped_to_Genome)) +
   geom_boxplot(outliers = F) +
   geom_jitter(width = 0.2, alpha = 0.5) +
-  labs(y = "Reads Mapped to Genome (Cellranger Quantification)", x = "Strain",
-       subtitle = paste0("ANOVA p = ", signif(p_genome, 3))) +
+  labs(y = "Reads Mapped to Genome", x = "Strain",
+       title = paste0("ANOVA p = ", signif(p_genome, 3))) +
   ylim(c(.3, 1)) +
-  theme_minimal()
+  theme_minimal(base_family = "Helvetica",base_size = 19) +
+  theme(axis.text.x = element_text(face = "bold", color = "black",angle = 45,vjust = 1, hjust = 1),
+        axis.text.y = element_text(face = "bold", color = "black"),
+        plot.title = element_text(face = "bold", size = 22),
+        axis.title = element_text(face = "bold", size = 20)
+        )
+
+
 
 transcriptome_plot = ggplot(animal_metadata, aes(x = strain, y = Reads_Mapped_Confidently_to_Transcriptome)) +
   geom_boxplot(outliers = F) +
   geom_jitter(width = 0.2, alpha = 0.5) +
   ylim(c(.3, 1)) +
-  labs(y = "Reads Mapped Confidently to Transcriptome (Cellranger Quantification)", x = "Strain",
-       subtitle = paste0("ANOVA p = ", signif(p_transcriptome, 3))) +
-  theme_minimal()
+  labs(y = "Reads Mapped Confidently to Transcriptome", x = "Strain",
+       title = paste0("ANOVA p = ", signif(p_transcriptome, 3))) +
+  theme_minimal(base_family = "Helvetica",base_size = 19) +
+  theme(axis.text.x = element_text(face = "bold", color = "black",angle = 45,vjust = 1, hjust = 1),
+        axis.text.y = element_text(face = "bold", color = "black"),
+        plot.title = element_text(face = "bold", size = 22),
+        axis.title = element_text(face = "bold", size = 20)
+        )
 
 strain_vis_plot = genome_plot + transcriptome_plot
 strain_vis_plot
-ggsave("strain alignment visualizations.pdf",strain_vis_plot,width = 20, height = 7)
+ggsave("strain alignment visualizations.pdf",strain_vis_plot,width = 20, height = 8)
 ```
 

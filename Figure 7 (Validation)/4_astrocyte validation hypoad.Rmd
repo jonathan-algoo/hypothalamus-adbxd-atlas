@@ -29,7 +29,7 @@ non_neuronal_cluster_assignments = readRDS("../shared objs and code/non_neuronal
 astro_mouse = non_neuronal_cluster_assignments[grepl("astrocyte-",non_neuronal_cluster_assignments)]
 mouse_ge = mouse_ge[,names(astro_mouse)]
 ```
-
+Get one to one orthologs and subset matrices 
 ```{r}
 library(babelgene)
 
@@ -62,7 +62,6 @@ harmony integration
 get_pcs_from_initial_dataset = function(initial_ge_matrix, n_var_genes = 2000, nthreads = 8, npcs = 30) {
   initial_ge_matrix <- multiply_cols(initial_ge_matrix, 1/Matrix::colSums(initial_ge_matrix))
   initial_ge_matrix <- log1p(initial_ge_matrix * 1e4) # Log transform
-  #stats <- matrix_stats(initial_ge_matrix, row_stats="variance", threads = nthreads)
   # Variable Gene Selection Using Seurat VST 
   variable_genes <- Seurat::FindVariableFeatures(initial_ge_matrix, nfeatures = n_var_genes) 
   variable_genes = variable_genes %>% filter(variable == T) 
@@ -89,7 +88,7 @@ pcs_astro = get_pcs_from_initial_dataset(joint_ge, n_var_genes = 5000)
 harmony_astro = RunHarmony(pcs_astro,meta_data = joint_meta$species)
 ```
 
--- update
+evaluation of ml methods (rf, xgb, ridge) on mouse labels prior to classification of human data
 ```{r}
 library(xgboost)
 library(ranger)
@@ -98,8 +97,7 @@ library(recipes)
 library(themis)
 library(caret)
 set.seed(501)
-
-# --- align embedding with metadata -------------------------------------------
+#cells (x) by dimensions (y)
 emb <- as.matrix(harmony_astro)
 colnames(emb) <- paste0("PC", seq_len(ncol(emb)))
 stopifnot(all(rownames(emb) == joint_meta$cell_id))
@@ -107,9 +105,9 @@ stopifnot(all(rownames(emb) == joint_meta$cell_id))
 mouse_idx <- which(joint_meta$species == "mouse")
 human_idx <- which(joint_meta$species == "human")
 
-X_mouse <- emb[mouse_idx, , drop = FALSE]#embedding
+X_mouse <- emb[mouse_idx, ]#embedding
 y_mouse <- factor(joint_meta$cluster[mouse_idx])#cluster
-X_human <- emb[human_idx, , drop = FALSE]
+X_human <- emb[human_idx, ]
 
 # --- 80/20 stratified train/test split ---------------------------------------
 train_idx <- createDataPartition(y_mouse, p = 0.8, list = FALSE)[, 1]
@@ -142,30 +140,31 @@ y_train_int <- as.integer(factor(y_train, levels = y_levels)) - 1L
 
 dtrain <- xgb.DMatrix(data = X_train, label = y_train_int)
 
+
 params <- list(
   objective   = "multi:softprob",
   num_class   = length(y_levels),
   eval_metric = "mlogloss",
-  seed = 1,
-  nthread = 1
+  seed = 1
 )
 
-cv_xgb <- xgb.cv(
+cv <- xgb.cv(
   params  = params,
   data    = dtrain,
-  nrounds = 500,
-  nfold   = 5,
-  early_stopping_rounds = 20,
-  verbose = 0
+  nrounds = 1000,
+  nfold   = 10,
+  early_stopping_rounds = 20
 )
 
+#cross-validation to get number of training rounds
 xgb_model <- xgb.train(
   params  = params,
   data    = dtrain,
-  nrounds = cv_xgb$early_stop$best_iteration
+  nrounds = cv$early_stop$best_iteration
 )
 
 P_xgb_test    <- predict(xgb_model, newdata = X_test)
+#get top value for each row (cell) and convert it to factor
 xgb_test_pred <- factor(y_levels[max.col(P_xgb_test)], levels = levels(y_test))
 
 # --- Random Forest (ranger) --------------------------------------------------
@@ -186,7 +185,8 @@ cvfit <- cv.glmnet(
   alpha = 0, nfolds = 5, parallel = FALSE
 )
 
-P_glm_test    <- drop(predict(cvfit, newx = X_test, s = "lambda.min", type = "response"))
+#response used for probabilities
+P_glm_test    <- drop(predict(cvfit, newx = X_test, s = "lambda.1se", type = "response"))
 glm_test_pred <- factor(colnames(P_glm_test)[max.col(P_glm_test)], levels = levels(y_test))
 
 # --- Compare all three on held-out mouse test set ----------------------------
@@ -219,10 +219,7 @@ f1_df <- data.frame(
 
 print(f1_df)
 ```
-Top performing class: xgboost, although astrocyte-5 has lowest f1 scores across all (prob because very rare)
-
-
-
+Top performing class: xgboost by F1
 ```{r}
 library(ranger)
 
@@ -234,9 +231,9 @@ stopifnot(all(rownames(emb) == joint_meta$cell_id)) # RunHarmony preserves row o
 mouse_idx <- which(joint_meta$species == "mouse")
 human_idx <- which(joint_meta$species == "human")
 
-X_mouse <- emb[mouse_idx, , drop = FALSE]
+X_mouse <- emb[mouse_idx,]
 y_mouse <- factor(joint_meta$cluster[mouse_idx])
-X_human <- emb[human_idx, , drop = FALSE]
+X_human <- emb[human_idx, ]
 
 table(y_mouse)
 ```
@@ -278,7 +275,6 @@ y_mouse_sm <- mouse_balanced$cluster
 xgboost
 ```{r}
 library(xgboost)
-set.seed(501)
 
 # xgboost needs 0-indexed integer labels
 y_levels   <- levels(factor(y_mouse_sm))
@@ -286,27 +282,19 @@ y_mouse_int <- as.integer(factor(y_mouse_sm, levels = y_levels)) - 1L
 
 dtrain <- xgb.DMatrix(data = X_mouse_sm, label = y_mouse_int)
 
-params <- list(
-  objective   = "multi:softprob",
-  num_class   = length(y_levels),
-  eval_metric = "mlogloss"
-)
-
 # 5-fold CV to pick the number of rounds
 cv <- xgb.cv(
-  params  = params,
+  params  = params,#use prev params
   data    = dtrain,
-  nrounds = 500,
-  nfold   = 5,
+  nrounds = 1000,
+  nfold   = 10,
   early_stopping_rounds = 20
 )
-
-best_n <- cv$early_stop$best_iteration
 
 xgb_model <- xgb.train(
   params  = params,
   data    = dtrain,
-  nrounds = best_n
+  nrounds = cv$early_stop$best_iteration
 )
 
 # 6. Predict for human astrocytes
@@ -316,85 +304,45 @@ rownames(P_xgb) <- rownames(X_human)
 
 human_xgb_classes<- y_levels[max.col(P_xgb, ties.method = "first")]
 names(human_xgb_classes) = P_xgb %>% rownames
+
+human_meta$xgb_prediction = human_xgb_classes[human_meta$cell_id]
 ```
 
-
+Plot markers
 ```{r}
 # --- log-normalised human matrix, full gene space ----------------------------
 human_norm <- hypoad_ge[, human_meta$cell_id]
 
 human_norm <- multiply_cols(human_norm, 1 / Matrix::colSums(human_norm))
 
-human_norm <- log1p(human_norm * 1e4)
+ln_ge <- log1p(human_norm * 1e4)
 
-#z-score then pseudobulk
+stats   <- matrix_stats(ln_ge, row_stats = "variance")
+gene_means <- stats$row_stats["mean", ]
+gene_sds <- sqrt(stats$row_stats["variance", ])
+#scaled matrix
+ln_ge = (ln_ge - gene_means) / gene_sds
+
+ln_pseudobulk = ln_ge %>% pseudobulk_matrix(cell_groups = human_meta$xgb_prediction, method = "mean", threads = 8L)
+
+percent_pseudobulk = hypoad_ge[, human_meta$cell_id] > 0
+percent_pseudobulk = percent_pseudobulk %>% pseudobulk_matrix(cell_groups = human_meta$xgb_prediction, method = "mean", threads = 8L)
 
 
 
-# --- ortholog panel -----------------------------------------------------------
-gene_panel_mouse <- c("Arhgef28","Tsc22d3","Tspo","C3","Myoc","Ifit1","Ifit3",
-                      "Serpina3n","Chi3l1","Frmpd1","Folh1","Tshz2","Pla2g7",
-                      "Gsdme","Unc13c","Deptor","Fos","Nr4a1","Gfap","Vim",
-                      "Aqp4","Xist","Tsix","Uty")
+selected_genes = c("SERPINA3","CHI3L1")
+dotplot_df = data.frame()
+for(gene in selected_genes){
+  for(cluster in unique(human_meta$xgb_prediction)){
+    avg_exp = ln_pseudobulk[gene, cluster]
+    pct_exp = percent_pseudobulk[gene, cluster] * 100
+    dotplot_df = rbind(dotplot_df, data.frame(gene = gene, cluster = cluster, avg_exp = avg_exp, pct_exp = pct_exp))
+  }
+}
 
-panel_map <- orthologs(gene_panel_mouse, species = "mouse", human = FALSE) %>%
-  select(mouse_symbol = symbol, human_symbol) %>%
-  bind_rows(tribble(~mouse_symbol, ~human_symbol,
-                    "Xist",      "XIST",
-                    "Tsix",      "TSIX",
-                    "Uty",       "UTY",
-                    "Serpina3n", "SERPINA3",
-                    "Chi3l1",    "CHI3L1")) %>%
-  distinct(mouse_symbol, human_symbol) %>%
-  filter(human_symbol %in% rownames(human_norm)) %>%
-  mutate(mouse_symbol = factor(mouse_symbol, levels = gene_panel_mouse)) %>%
-  arrange(mouse_symbol) %>%
-  mutate(gene_label = fct_inorder(paste0(mouse_symbol, " (", human_symbol, ")")))
-
-message("unmapped: ", paste(setdiff(gene_panel_mouse, panel_map$mouse_symbol), collapse = ", "))
-
-# --- z-score once, reuse for all three panels ---------------------------------
-mat <- as(human_norm[unique(panel_map$human_symbol), ], "dgCMatrix")
-z   <- (as.matrix(mat) - rowMeans(mat)) / apply(mat, 1, sd)
-z[!is.finite(z)] <- 0
-colnames(z) <- colnames(human_norm)
-
-# --- tidy predictions
-
-human_meta$xgb_prediction = human_xgb_classes
-preds_all <- human_meta %>%
-  select(cell_id, xgb_prediction) %>%
-  pivot_longer(-cell_id, names_to = "method", values_to = "pred") %>%
-  filter(!is.na(pred)) %>%
-  mutate(pred   = as.character(pred),
-         method = recode(method,
-                         xgb_prediction = "xgboost") %>% fct_inorder())
-
-#get ge + ln pseudobulk matrix for graph
-preds_all_tidy = z %>% 
-  t() %>% 
-  as.data.frame() %>% 
-  rownames_to_column("cell_id") %>% 
-  pivot_longer(-cell_id, names_to = "gene", values_to = "z_expr")
-
-preds_all_tidy$predicted_class = preds_all$pred[match(preds_all_tidy$cell_id,preds_all$cell_id)]
-
-cluster_level_z = preds_all_tidy %>% select(-cell_id) %>%  group_by(gene, predicted_class) %>% summarize(mean_z_expr = mean(z_expr))
-# --- plot ---------------------------------------------------------------------
-cluster_level_z$gene = factor(cluster_level_z$gene, levels = c(panel_map$human_symbol))
-
-#filter just to serpina3/chi3l1
-astro_plot_data = cluster_level_z %>% filter(gene %in% c("SERPINA3","CHI3L1"))
-
-# --- compute percent expressed per cluster for the two genes ------------------
-raw_binary_expr <-  hypoad_ge[c("SERPINA3", "CHI3L1"),human_meta$cell_id] > 0
-predicted_annotations_per_cell = preds_all_tidy$predicted_class[match(colnames(raw_binary_expr), preds_all_tidy$cell_id)]
-percent_exp_per_cluster = raw_binary_expr %>% pseudobulk_matrix(cell_groups = predicted_annotations_per_cell,method = "mean")
-percent_exp_per_cluster = percent_exp_per_cluster %>% t() %>% as.data.frame() %>% rownames_to_column("predicted_class") %>%   pivot_longer(- "predicted_class", names_to = "gene",values_to = "percent_exp")
-astro_plot_data = astro_plot_data %>% left_join(percent_exp_per_cluster, by = c("predicted_class","gene"))
-astro_marker_map_xgb = ggplot(astro_plot_data, aes(x = gene, y = predicted_class, fill = mean_z_expr, size = percent_exp)) +
+astro_marker_map_xgb = ggplot(dotplot_df, aes(x = gene, y = cluster, fill = avg_exp, size = pct_exp)) +
   geom_point(shape = 21, color = "black") +
-  scale_size_area(max_size = 20, name = "Fraction\nExpressed") +
+  scale_size_area(max_size = 20, name = "Percent\nExpressed") +
   scale_fill_gradient2(low = "#3B4CC0", mid = "grey95", high = "#B40426",
                        midpoint = 0,limits = c(-2,2), name = "Mean z-scored\nlog-normalized\nexpression") +
   labs(x = "",
@@ -409,7 +357,6 @@ astro_marker_map_xgb = ggplot(astro_plot_data, aes(x = gene, y = predicted_class
         strip.text = element_text(face = "bold", hjust = 0))
 
 ```
-
 
 
 ```{r}
@@ -619,7 +566,7 @@ combined_results = readRDS("combined_compositional_results_human_astro.rds")
 sig_at_least_2 <- combined_results %>%
   select(-contrast) %>% #all contrasts same
   mutate(raw_p_val = case_when(
-    is.na(raw_p_val) ~ 1,
+    is.na(raw_p_val) ~ adj_p_val, #set to fdr-adjusted p-value for sccomp
     .default =  raw_p_val
   )) %>% 
   filter(raw_p_val < .1 | adj_p_val < .1) %>% 
@@ -675,7 +622,7 @@ p_astro5 <- prop_plot_df %>%
         annotations = annotations,
         y_position  = y_position),
       manual      = TRUE,
-      textsize    = 5,
+      textsize    = 10,
       vjust       = .3,
       tip_length  = 0.02,
       inherit.aes = FALSE
@@ -690,9 +637,9 @@ p_astro5 <- prop_plot_df %>%
         axis.text = element_text(face = "bold",color = "black",size = 18),
         panel.grid.minor = element_blank())
 
-p_astro_validation <- p_astro5 + plot_spacer() + astro_marker_map_xgb + plot_layout(widths = c(.3,.1,.6))
+p_astro_validation <- p_astro5 + plot_spacer() + astro_marker_map_xgb + plot_layout(widths = c(.5,.05,.45))
 
-ggsave("astrocyte-validation-panel.pdf", p_astro_validation, width = 18, height = 10)
+ggsave("astrocyte-validation-panel.pdf", p_astro_validation, width = 13, height = 10)
 ```
 
 
@@ -860,7 +807,7 @@ astro_5_plot <- ggplot(
     comparisons  = list(c("Ntg", "5XFAD")),
     annotations  = "***",
     y_position   = .055,
-    textsize     = 5,
+    textsize     = 10,
     vjust        = .3,
     tip_length   = 0.02
   ) +

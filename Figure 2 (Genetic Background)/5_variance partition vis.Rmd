@@ -17,7 +17,7 @@ library(grid)
 ```
 
 
-Loop over each class, add class name and put together. Plot celltype specific genes
+Loop over each class. Plot celltype specific genes and other variable gene visualizations.
 ```{r}
 #read in results
 all_results = readRDS("all_results_var_partition_analysis.rds")
@@ -53,8 +53,8 @@ write.csv(
   num_classes_gene, 
   "./variance_partition_high_strain_genes_and_classes.csv")
 
-#supp table 3
-num_classes_gene %>% write_csv("../supplementary tables/Supplementary Table 1")
+#supp table 1
+num_classes_gene %>% write_csv("../supplementary tables/Supplementary Table 1.csv")
 
 # Identify genes appearing in 3 or more classes
 shared_genes_3plus <- num_classes_gene %>%
@@ -97,7 +97,7 @@ gene_class_matrix <- high_strain_genes %>%
   distinct(gene, class) %>%
   mutate(class = str_to_title(class)) %>% 
   mutate(present = 1) %>%
-  pivot_wider(names_from = class, values_from = present, values_fill = 0) %>%
+  pivot_wider(names_from = class, values_from = present, values_fill = 0) %>% #0 if strain/class combo not present, 1 if it is 
   column_to_rownames("gene") %>%
   as.matrix()
 
@@ -106,14 +106,19 @@ gene_class_matrix <- high_strain_genes %>%
 
 
 ```{r}
-# 1. Build the full combination matrix
+#Create combination matrix -
 comb_mat_full <- make_comb_mat(gene_class_matrix, mode = "distinct")
+#print comb_mat_full to get info on it 
 
-# 2. Capture full set sizes BEFORE filtering (so they reflect true totals)
+#Get number per cell class (set size), doesn't give the combination sizes but 
+#gives number of variable genes per class
 full_set_sizes <- set_size(comb_mat_full)
 
-# 3. Filter to intersections > 1
-comb_mat_filtered <- comb_mat_full[comb_size(comb_mat_full) > 1]
+# only include, in upset plot, genes in combinations that have at least 3 values 
+#(for visualization)
+#comb_size(comb_mat_full) gives size of each combo before and after, filter 
+#out sets with < 3 elements
+comb_mat_filtered <- comb_mat_full[comb_size(comb_mat_full) >= 3]
 
 # 4. Reorder full_set_sizes to match the filtered matrix's set (row) order
 aligned_set_sizes <- full_set_sizes[set_name(comb_mat_filtered)]
@@ -135,17 +140,18 @@ l_annot <- rowAnnotation(
   annotation_name_side = "bottom"
 )
 
-# 6. Draw
+#only include sets with at least 3 elements because otherwise there are too many
+#in visualization 
+
+#Create upset plot
 upset_plot <- UpSet(
   comb_mat_filtered,
-  comb_order = order(-comb_size(comb_mat_filtered)),
-  set_order = order(-aligned_set_sizes),
-  top_annotation = upset_top_annotation(comb_mat_filtered, add_numbers = TRUE),
+  comb_order = order(comb_size(comb_mat_filtered),decreasing = T),#reorder to be based on size)
+  top_annotation = upset_top_annotation(comb_mat_filtered, add_numbers = TRUE,numbers_gp = gpar(fontsize = 8, fontface = "bold")),
   right_annotation = NULL,
   row_names_gp = gpar(fontsize = 10),
   row_names_side = "left",
-  left_annotation = l_annot,
-  column_title = "Shared Variable Genes Across Classes"
+  left_annotation = l_annot
 )
 
 pdf("./num_genes_shared_across_classes_upset.pdf", width = 10, height = 4)
@@ -240,6 +246,7 @@ strain_cluster_matrix <- strain_order_df %>%
 
 strain_hclust <- hclust(dist(strain_cluster_matrix))
 strain_order <- strain_hclust$labels[strain_hclust$order]
+#order: b6 then b6xd2 then the hierarchical 
 strain_order <- c("B6", "B6xD2Gpnmb",setdiff(strain_order, c("B6","B6xD2Gpnmb")))
 
 animal_order <- heatmap_tidy_data %>%
@@ -334,6 +341,7 @@ heatmap_plot <- ggplot(heatmap_tidy_data, aes(x = animal_id, y = gene, fill = sc
     strip.text.y.left = element_text(angle = 0, face = "bold", size = 14),
     strip.text.x = element_text(face = "bold", angle = 0, hjust = .25, size = 14),
     legend.title = element_text(face = "bold", size = 14),
+    
     legend.text = element_text(size = 12, face = "bold"),
     strip.placement = "outside",
     panel.spacing.x = unit(0.1, "lines")

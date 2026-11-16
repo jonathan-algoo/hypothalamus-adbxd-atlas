@@ -194,10 +194,6 @@ dreamlet_results <- dreamlet_results %>%
            comparison %in% comparisons_of_interest &
            adj.P.Val < .05)
 
-
-
-
-
 library(gprofiler2)
 ortholog_df <- gorth(query = dreamlet_results$gene,
                      source_organism = "mmusculus",
@@ -257,9 +253,6 @@ write_csv(ad_results_neuronal_rosmap_female,"human_neuron_rosmap_dreamlet_result
 
 ```
 
-
-
-
 ```{r}
 ad_results_hypoad <- ad_results_neuronal %>% filter(dataset == "hypoad") %>% filter(assay == "medial mammillary neuron")
 genes_to_plot = ad_results_hypoad %>% filter(adj.P.Val.oneway < .05) %>% pull(ID)
@@ -310,10 +303,6 @@ saveRDS(ad_results_hypoad,"dreamlet_hypoad_validation_medial_mb.rds")
 Hypoad plot
 ```{r}
 library(ggsignif)
-
-
-
-# --- significance annotations ---
 sig_labels <- ad_results_hypoad %>%
   filter(ID %in% genes_to_plot) %>%
   mutate(
@@ -342,7 +331,6 @@ star_df <- plot_df %>%
 
 # --- plot ---
 color_ad_ctl = c("ctl" ="#a1bad4","ad"="#f6b2ba")
-
 
 mb_deg_validation_plots <- ggplot(plot_df, aes(x = ad, y = log2_cpm, fill = ad)) +
   geom_boxplot(outliers = FALSE) +
@@ -376,7 +364,7 @@ ggsave("hypoad-medial-mb-validation-degs.pdf",
 ```
 
 ```{r}
-# --- Mouse medial MB validated DEGs — one plot per cluster, combined with patchwork ---
+#Mouse medial MB validated DEGs — one plot per cluster, combined with patchwork 
 library(patchwork)
 
 intermediate_dreamlet = qs2::qs_read("../shared objs and code/intermediate_dreamlet_obj.qs2")
@@ -406,7 +394,7 @@ color_mapping_strains_to_colors <- c(
   "B6xBXD28" = "#BBCC33",  "B6xBXD12" = "#AAAA00",
   "B6xBXD73" = "#DDDDDD",  "B6" = "#000000"
 )
-# --- Build one tidy frame across clusters, facet by gene (cluster) ---
+
 mouse_mb_tidy <- lapply(mouse_mb_clusters, function(clust) {
   clust_genes <- mouse_mb_validated %>%
     filter(cluster == clust) %>%
@@ -421,7 +409,7 @@ mouse_mb_tidy <- lapply(mouse_mb_clusters, function(clust) {
   filter(age_genotype %in% c("old_Ntg", "old_5XFAD") & sex == "Female") %>%
   mutate(panel = paste0(gene, " (", cluster_labels[cluster], ")"))
 
-# panel ordering: all genes but RHBDL3, then RHBDL3 (since only gene in two clusters)
+#panel order: all genes but RHBDL3, then RHBDL3 (since only gene in two clusters)
 
 panel_order = c("Tgfb2 (Ptger3+/Gpr83+)","Rhbdl3 (Ptger3+/Gpr83+)","Rhbdl3 (Nts)","Bmper (Ptger3+/Gpr83+)","Myo16 (Ptger3+/Gpr83+)")
 

@@ -281,9 +281,14 @@ combined_plot_list = c(list(p + guides(color = guide_legend(override.aes = list(
 
 combined_plot = wrap_plots(combined_plot_list, ncol = 8, nrow = 7) 
 
-# Save the combined plot
+# Save the combined plot in png and pdf formats
 ggsave("microglia_factors_umap_all.pdf", combined_plot, 
        width = 40, height = 20, limitsize = F, units = "in")
+# Save the combined plot
+ggsave("microglia_factors_umap_all.png", combined_plot, 
+       width = 40, height = 20, limitsize = F, units = "in")
+
+
 ```
 
 Plot UMAP of Factor 13

@@ -23,7 +23,6 @@ significant_results_at_least_2 = combined_results %>%
   filter(n() >= 2) %>%
   ungroup()
 
-
 #get adj p values by method for each cluster, cell_class, contrast, direction in one row
 significant_results_wide = significant_results_at_least_2 %>%
   dplyr::select(-raw_p_val) %>%
@@ -51,11 +50,9 @@ animal_phenotype_data_ge_mice = animal_phenotype_data %>% filter(ID %in% animal_
 animal_phenotype_data_ge_mice$age_at_death = animal_metadata$age[match(animal_phenotype_data_ge_mice$ID, animal_metadata$animal_id)]
 animal_phenotype_data_at_death = animal_phenotype_data_ge_mice %>% filter(age_at_death == AgeGrp)
 
-
 #add CFA and CFM (cognitive metrics) for each mouse
 animal_metadata$CFA = animal_phenotype_data_at_death$CFC.PS4[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
 animal_metadata$CFM = animal_phenotype_data_at_death$CFM.Total[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
-
 
 #add Weight (metabolic/physical metrics) for each mouse
 animal_metadata$Weight = animal_phenotype_data_at_death$Weight[match(animal_metadata$animal_id, animal_phenotype_data_at_death$ID)]
@@ -86,7 +83,7 @@ cell_metadata$animal_id = gsub(".*_(\\d+)-.*", "\\1", cell_metadata$cell_id)
 #join cell metadata with animal metadata by animal_id
 cell_metadata = cell_metadata %>% left_join(animal_metadata, by = "animal_id")
 
-#Remove the single animal w/o CFC/CFA measurements (could be potential confound)
+#Remove the single animal w/o CFC/CFA measurements
 animal_wo_cfa_or_cfm = animal_metadata %>% filter(is.na(CFM) | is.na(CFA)) %>% pull(animal_id) %>% unique %>% as.character
 animal_metadata = animal_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
 cell_metadata = cell_metadata %>% filter(!animal_id %in% animal_wo_cfa_or_cfm)
@@ -148,16 +145,7 @@ for(i in seq_along(cluster_list)) {
   cluster_counts = cluster_counts %>% ungroup()
   cluster_counts_per_class[[cur_class]] = cluster_counts
 }
-
-
 ```
-
-
-
-
-
-
-
 
 Get relative microglia cluster proportions per animal
 ```{r}
@@ -197,7 +185,6 @@ get_pvalue_annotation <- function(comparison, cluster_name, results_df) {
     return("NS")
   }
   
-
   # Extract p-value from sig results df (if not there, not sig so return "")
   result_row <- results_df %>%
     filter(cluster == cluster_name, contrast == contrast_name)
@@ -251,8 +238,9 @@ color_mapping_strains_to_colors <- c(
 "B6xBXD28" = "#BBCC33",
 "B6xBXD12" = "#AAAA00",
 "B6xBXD73" = "#DDDDDD",
-"B6" = "#000000" # Black
+"B6" = "#000000"
 )
+#micro 4 plot
 micro_4_plot = ggplot(microglia_proportions %>% filter(cluster == "microglia-4"), aes(x = sex_age_genotype, y = proportion)) +
   geom_boxplot(outliers = F) +
   geom_jitter(aes(color = strain),height = 0, width = .2, size = 6) +
@@ -278,11 +266,6 @@ geom_signif(annotations = annotations_micro4,
             y_position = c(.65, .45,.45,.45),
             textsize = 12,
             family = "Helvetica")
-#eac
-
-ggsave("micro_4_plot.pdf", micro_4_plot, width = 9, height = 10) # Adjusted size
-
-
 
 #Micro 5 plot
 micro_5_plot = ggplot(microglia_proportions %>% filter(cluster == "microglia-5"), aes(x = sex_age_genotype, y = proportion)) +
@@ -310,8 +293,6 @@ geom_signif(annotations = annotations_micro5,
             y_position = c(.08, .1,.1,.18),
             textsize = 12,
             family = "Helvetica")
-
-ggsave("micro_5_plot.pdf", micro_5_plot, width = 9, height = 10) # Adjusted size
 
 ```
 

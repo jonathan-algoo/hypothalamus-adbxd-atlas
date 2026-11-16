@@ -7,6 +7,8 @@ date: "2026-09-08"
 ```{r setup}
 library(tidyverse)
 library(patchwork)
+library(GO.db)
+set.seed(1)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 glial_gsea_results <- qs2::qs_read("./gsea_results_barrier_cells.qs2")
@@ -34,63 +36,81 @@ barrier_panels <- tribble(
   "vascular-pericytes",      "prolonged_amyloid_contrast_m"
 )
 
+#monoatomic ion transport
+desc_ids <- c("GO:0006811", GOBPOFFSPRING[["GO:0006811"]])
+
+desc_df <- tibble::tibble(
+    ID          = desc_ids,
+    Description = AnnotationDbi::Term(desc_ids)
+)
+
+#inorganic anion transport
+desc_ids_2 <- c("GO:0015698", GOBPOFFSPRING[["GO:0015698"]])
+
+desc_df_2 <- tibble::tibble(
+    ID          = desc_ids_2,
+    Description = AnnotationDbi::Term(desc_ids_2))
+
+
+desc_df = desc_df %>% bind_rows(desc_df_2) %>% distinct
+
+
 # ── Ion transport terms per cluster ───────────────────────────────────────────
-ion_terms_by_cluster <- tribble(
-  ~cluster,                  ~Description,
-  "VLMC-1",                  "sodium ion transport",
-  "VLMC-1",                  "sodium ion transmembrane transport",
-  "VLMC-1",                  "organic anion transport",
-  "VLMC-1",                  "monoatomic ion transmembrane transport",
-  "VLMC-1",                  "metal ion transport",
-  "VLMC-1",                  "calcium ion transport",
-  "VLMC-1",                  "calcium ion transmembrane transport",
-  
-  "tanycyte-2",              "organic anion transport",
-  "tanycyte-2",              "monoatomic ion transmembrane transport",
-  "tanycyte-2",              "monoatomic cation transmembrane transport",
-  "tanycyte-2",              "metal ion transport",
-  "tanycyte-2",              "inorganic ion transmembrane transport",
-  "tanycyte-1",              "sodium ion transport",
-  "tanycyte-1",              "sodium ion transmembrane transport",
-  "tanycyte-1",              "monoatomic cation transmembrane transport",
-  "tanycyte-1",              "metal ion transport",
-  "tanycyte-1",              "inorganic ion transmembrane transport",
-  "tanycyte-1",              "inorganic cation transmembrane transport",
-  "ependymal-1",             "sodium ion transport",
-  "ependymal-1",             "sodium ion transmembrane transport",
-  "ependymal-1",             "potassium ion transport",
-  "ependymal-1",             "potassium ion transmembrane transport",
-  "ependymal-1",             "monoatomic ion transport",
-  "ependymal-1",             "monoatomic ion transmembrane transport",
-  "ependymal-1",             "monoatomic cation transport",
-  "ependymal-1",             "monoatomic cation transmembrane transport",
-  "ependymal-1",             "metal ion transport",
-  "ependymal-1",             "inorganic ion transmembrane transport",
-  "ependymal-1",             "inorganic cation transmembrane transport",
-  "ependymal-2",             "sodium ion transport",
-  "ependymal-2",             "potassium ion transport",
-  "ependymal-2",             "potassium ion transmembrane transport",
-  "ependymal-2",             "monoatomic ion transmembrane transport",
-  "ependymal-2",             "monoatomic cation transmembrane transport",
-  "ependymal-2",             "metal ion transport",
-  "ependymal-2",             "inorganic ion transmembrane transport",
-  "ependymal-2",             "inorganic ion import across plasma membrane",
-  "ependymal-2",             "inorganic cation transmembrane transport",
-  "ependymal-2",             "inorganic cation import across plasma membrane",
-  "vascular-endothelial_1",  "monoatomic ion transmembrane transport",
-  "vascular-endothelial_1",  "monoatomic cation transport",
-  "vascular-endothelial_1",  "monoatomic cation transmembrane transport",
-  "vascular-endothelial_1",  "metal ion transport",
-  "vascular-endothelial_1",  "inorganic ion transmembrane transport",
-  "vascular-endothelial_1",  "inorganic cation transmembrane transport",
-  "vascular-endothelial_2",  "transmembrane transport",
-  "vascular-endothelial_2",  "monoatomic ion transport",
-  "vascular-endothelial_2",  "metal ion transport",
-  "vascular-endothelial_2",  "intracellular potassium ion homeostasis",
-  "vascular-pericytes",      "sodium ion transport",
-  "vascular-pericytes",      "sodium ion transmembrane transport",
-  "vascular-pericytes",      "intracellular sodium ion homeostasis"
-) %>% mutate(is_ion = TRUE)
+ion_terms_by_cluster <- glial_gsea_results %>%
+  filter(grepl("prolonged_amyloid", contrast)) %>%
+  filter(Description %in% desc_df$Description) %>% 
+  filter(!grepl("regulation|Regulation", Description)) %>%
+  filter(p.adjust < .05) %>%
+  distinct(cluster, Description) %>%
+  mutate(is_ion = TRUE)
+
+#highlight trends for all 12 altered types w/ion transport differences:
+#all VLMC-1 (only one sig contrast)
+#tanycyte-1 only those sig in both 5x 14 mo Males and Females
+#tanycyte-2 only those sig in both 6 and 14 mo 5x Males 
+#ependymal-1 all
+#ependymal-2 only those sig in both 6 mo 5x vs ntg m, 14 mo 5x vs ntg m and 14 mo 5x vs ntg f
+#vascular_endothelial-1 sig 14 mo both sexes 5x vs ntg
+#vascular_endothelial-2 all
+#vascular-pericytes all
+
+#for these ones show sig ones with all sig 
+term_rules <- tribble(
+  ~cluster,                  ~contrast,
+  "tanycyte-1",              "prolonged_amyloid_contrast_m",
+  "tanycyte-1",              "prolonged_amyloid_contrast_f",
+  "tanycyte-2",              "early_amyloid_contrast_m",
+  "tanycyte-2",              "prolonged_amyloid_contrast_m",
+  "ependymal-2",             "early_amyloid_contrast_m",
+  "ependymal-2",             "prolonged_amyloid_contrast_m",
+  "ependymal-2",             "prolonged_amyloid_contrast_f",
+  "vascular-endothelial_1",  "prolonged_amyloid_contrast_m",
+  "vascular-endothelial_1",  "prolonged_amyloid_contrast_f"
+)
+
+sig_hits <- glial_gsea_results %>%
+  filter(p.adjust < .05) %>%
+  distinct(cluster, contrast, Description)
+
+# erms that meet every required contrast for each cluster
+passing_terms <- term_rules %>%
+  inner_join(sig_hits, by = c("cluster", "contrast")) %>%
+  count(cluster, Description, name = "n_hit") %>% 
+  mutate(
+    keep_sig = case_when(
+      cluster == "tanycyte-1" & n_hit == 2 ~ T,
+      cluster == "tanycyte-2" & n_hit == 2 ~ T,
+      cluster == "ependymal-2" & n_hit == 3 ~ T,
+      cluster == "vascular-endothelial_1" & n_hit == 2 ~ T,
+      .default = F
+    )
+  ) %>% 
+  filter(keep_sig)
+
+ion_terms_subset <- bind_rows(
+  ion_terms_by_cluster %>% filter(!cluster %in% term_rules$cluster),#keep clusters with no filtering 
+  ion_terms_by_cluster %>% semi_join(passing_terms, by = c("cluster", "Description")) #keep clusters with filtering
+)
 
 # ── Labels ────────────────────────────────────────────────────────────────────
 cluster_labels <- c(
@@ -143,19 +163,28 @@ file_names <- c(
   "vascular-endothelial_2" = "endo-2-arterial",
   "vascular-pericytes"     = "pericytes"
 )
-```
 
-```{r build_function}
-# ── Per-cluster panel builder ─────────────────────────────────────────────────
-build_panel <- function(cl, data, panels, ion_terms, h) {
+cell_order <- c("VLMC-1", "tanycyte-2", "tanycyte-1",
+                "ependymal-1", "ependymal-2",
+                "vascular-endothelial_1", "vascular-endothelial_2",
+                "vascular-pericytes")
 
-  cl_contrasts <- panels %>% filter(cluster == cl) %>% pull(contrast) %>% unique()
-  cl_terms     <- ion_terms %>% filter(cluster == cl) %>% pull(Description)
-
-  # ── Heatmap data ─────────────────────────────────────────────────────────
-  heat_df <- data %>%
-    filter(cluster == cl, contrast %in% cl_contrasts,
-           Description %in% cl_terms) %>%
+#Plot and save heatmap panels
+for(i in 1:length(cell_order)) {
+  cur_cluster = cell_order[i]
+  #get number of terms to plot (relevant to height) and number of contrasts (relevant to width)
+  n_terms     <- ion_terms_subset %>% filter(cluster == cur_cluster) %>% nrow()
+  n_contrasts <- barrier_panels %>% filter(cluster == cur_cluster) %>% pull(contrast) %>% n_distinct()
+  # Scale dimensions to content
+  w <- 12 + n_contrasts * 2.2
+  h <- 10 + n_terms * 1.1
+  #selected ion_terms_subset used since we're not plotting all (will in supplementary)
+  cur_contrasts <- barrier_panels %>% filter(cluster == cur_cluster) %>% pull(contrast) %>% unique()
+  #go terms to plot
+  cur_terms = ion_terms_subset %>% filter(cluster == cur_cluster) %>% pull(Description)
+  heatmap_data <- glial_gsea_results %>%
+    filter(cluster == cur_cluster, contrast %in% cur_contrasts,
+           Description %in% cur_terms) %>%
     mutate(
       sig_label      = case_when(p.adjust < 0.001 ~ "***",
                                  p.adjust < 0.01  ~ "**",
@@ -165,104 +194,86 @@ build_panel <- function(cl, data, panels, ion_terms, h) {
       contrast_label = factor(contrast_labels[contrast],
                               levels = contrast_levels)
     )
-
-  nes_lim <- max(abs(heat_df$NES), na.rm = TRUE)
-
-  p_heat <- ggplot(heat_df,
+    nes_lim <- max(abs(heatmap_data$NES), na.rm = TRUE)
+    cur_plot = ggplot(heatmap_data,
                    aes(x = contrast_label, y = Description, fill = NES)) +
     geom_tile(color = "white", linewidth = 0.3) +
     geom_text(aes(label = sig_label), size = 30,vjust = .8,
               fontface = "bold", color = "black") +
     scale_fill_distiller(palette = "RdBu", direction = -1,
                          limits = c(-nes_lim, nes_lim), name = "NES",
-                        guide = guide_colorbar(barwidth = h * .2, barheight = h * 1.3)
+                        guide = guide_colorbar(barwidth = h * .5, barheight = h * 1.7)
 ) +
     scale_x_discrete(labels = \(x) str_wrap(x, width = 14), drop = TRUE) +
     scale_y_discrete(labels = \(x) str_wrap(x, width = 25)) +
     labs(x = NULL, y = NULL,
-         title = cluster_labels[cl]) +
-    theme_minimal(base_family = "Helvetica", base_size = 35) +
+         title = cluster_labels[cur_cluster]) +
+    theme_minimal(base_family = "Helvetica", base_size = 40) +
     theme(
-      axis.text.x    = element_text(angle = 45, vjust = 1, hjust = 1,
+      axis.text.x    = element_text(angle = 45, vjust = 1.1, hjust = 1,
                                     face = "bold", color = "black"),
       axis.text.y    = element_text(face = "bold", color = "black",hjust = 1),
       axis.title     = element_blank(),
       panel.grid     = element_blank(),
-      plot.title     = element_text(face = "bold", size = 40, hjust = 0.5,vjust = 0),
-      legend.text    = element_text(size = 25, face = "bold"),
-      legend.title   = element_text(size = 30, face = "bold")
+      plot.title     = element_text(face = "bold", size = 60, hjust = 0.5,vjust = 0),
+      legend.text    = element_text(size = 40, face = "bold"),
+      legend.title   = element_text(size = 40, face = "bold")
     )
-
-  p_heat
+  ggsave(paste0("ion-transport-", file_names[cur_cluster],".pdf"),
+         cur_plot, width = w, height = h)
 }
-# ── Build and save one PDF per cluster ────────────────────────────────────────
-cell_order <- c("VLMC-1", "tanycyte-2", "tanycyte-1",
-                "ependymal-1", "ependymal-2",
-                "vascular-endothelial_1", "vascular-endothelial_2",
-                "vascular-pericytes")
-
-walk(cell_order, function(cl) {
-
-  n_terms     <- ion_terms_by_cluster %>% filter(cluster == cl) %>% nrow()
-  n_contrasts <- barrier_panels %>% filter(cluster == cl) %>% pull(contrast) %>% n_distinct()
-
-  # Scale dimensions to content
-  w <- 12 + n_contrasts * 2.2
-  h <- 3 + n_terms * 1.1
-
-  panel <- build_panel(cl, glial_gsea_results, barrier_panels, ion_terms_by_cluster,h)
-
-  ggsave(sprintf("ion-transport-%s.pdf", file_names[cl]),
-         panel, width = w, height = h)
-})
 ```
 
-nes plots relative to other sig results
+nes plots relative to other sig results - show all ion transport changes,
+not just ones highlighted in the top panels
 ```{r}
-
+#only one don't plot - the one with sig effect_of_sex_young_5x
 barrier_panels_nes = barrier_panels %>% filter(!(cluster == "ependymal-2" & contrast == "effect_of_sex_young_5x"))
-# --- Plotting frame --------------------------------------------------------
-ion_df <- glial_gsea_results %>%
-  semi_join(barrier_panels_nes, by = c("cluster", "contrast")) %>%
-  left_join(ion_terms_by_cluster, by = c("cluster", "Description")) %>%
+
+#create master df with all terms in clusters/contrasts that we want to plot, across all cell types
+master_df <- glial_gsea_results %>%
+  semi_join(barrier_panels_nes, by = c("cluster", "contrast")) %>% #filter contrasts/clusters
+  left_join(ion_terms_by_cluster, by = c("cluster", "Description")) %>% #add the is_ion column to show these are the ones we're interested in
   mutate(
     is_ion         = replace_na(is_ion, FALSE),
     contrast_label = factor(contrast_labels[contrast],
                             levels = rev(unname(contrast_labels)))
-  )
+  ) %>% 
+  filter(p.adjust < .05) #only plotting sig terms so only need these
 
 # --- Shared theme ----------------------------------------------------------
 theme_barrier <- theme_minimal(base_family = "Helvetica", base_size = 12) +
-  theme(axis.text          = element_text(face = "bold", color = "black", size = 20),
-        axis.title.x       = element_text(face = "bold", size = 12),
+  theme(axis.text          = element_text(face = "bold", color = "black", size = 22),
+        axis.title.x       = element_text(face = "bold", size = 18),
         axis.title.y       = element_blank(),
         panel.grid.major.x = element_line(color = "grey90"),
         panel.grid.major.y = element_blank(),
         panel.grid.minor   = element_blank(),
         plot.title         = element_text(face = "bold", size = 11, hjust = 0.5))
 
-# --- Build one plot per cell type ------------------------------------------
+
+
 cell_order <- c("VLMC-1", "tanycyte-2", "tanycyte-1",
                 "ependymal-1", "ependymal-2",
                 "vascular-endothelial_1", "vascular-endothelial_2", "vascular-pericytes")
 
 cell_plots <- list()
 
-for (cl in cell_order) {
+for (cur_cluster in cell_order) {
 
-  cur_df     <- filter(ion_df, cluster == cl) %>% droplevels()
+  cur_df     <- filter(master_df, cluster == cur_cluster) %>% droplevels()
   cur_bg_sig <- filter(cur_df, !is_ion, p.adjust < 0.05)
   cur_fg_sig <- filter(cur_df,  is_ion, p.adjust < 0.05)
-    cell_plots[[cl]] <- ggplot(cur_df, aes(NES, contrast_label)) +
+  cell_plots[[cur_cluster]] <- ggplot(cur_df, aes(NES, contrast_label)) +
     geom_vline(xintercept = 0, color = "grey30", linewidth = 0.5) +
     geom_jitter(data = cur_bg_sig,
-                height = 0.18, width = 0, size = 0.7, alpha = 0.28, color = "grey65") +
+                height = 0.18, width = 0, size = 2, alpha = 0.28, color = "grey65") +
     geom_jitter(data = cur_fg_sig,
-                height = 0.18, width = 0, size = 3, alpha = 0.95,
+                height = 0.18, width = 0, size = 4, alpha = .7,
                 shape = 21, fill = "#C0392B", color = "black", stroke = 0.5) +
     scale_x_continuous(expand = expansion(mult = 0.05)) +
     scale_y_discrete(drop = TRUE) +
-    labs(x = "NES", y = NULL, title = cluster_labels[cl]) +
+    labs(x = "NES", y = NULL, title = cluster_labels[cur_cluster]) +
     theme_barrier
 }
 
@@ -288,23 +299,27 @@ ggsave("barrier-ion-transport-nes-combined.pdf", combined,
 ```
 
 
-
+Plot supplementary heatmap, with all contrast results for pathways that were 
+significant in either 14 mo 5x vs ntg M or 14 mo 5x vs ntg F comparisons.
 ```{r supplementary_function}
-# ── Supplementary heatmap: all 12 contrasts for one cluster ───────────────────
-# ── Supplementary heatmap: all 12 contrasts for one cluster ───────────────────
-# --- Build one plot per cell type ------------------------------------------
 cell_order <- c("VLMC-1", "tanycyte-1","tanycyte-2", 
                 "ependymal-1", "ependymal-2",
                 "vascular-endothelial_1", "vascular-endothelial_2", "vascular-pericytes")
 
-build_supplementary_heatmap <- function(cl, data, ion_terms, h) {
 
-  cl_terms <- ion_terms %>% filter(cluster == cl) %>% pull(Description)
+plot_list_supp = list()
+for(cur_cluster in cell_order) {
+  #all significant terms in either 14 mo 5x M or F 
+  total_number_sig_terms_cur_cluster = ion_terms_by_cluster %>% filter(cluster == cur_cluster) %>% nrow()
+  # 12 contrasts on x-axis; height scales with term count
+  h <- 10 + n_terms * 1.7
+  cur_cluster_terms_to_plot = ion_terms_by_cluster %>% filter(cluster == cur_cluster) %>% pull(Description)
 
-  heat_df <- data %>%
-    filter(cluster == cl,
+  #filter to the cluster/descriptions to plot, and get all comparison results
+  cur_plot_heatmap_data <- glial_gsea_results %>%
+    filter(cluster == cur_cluster,
            contrast %in% names(all_contrast_labels),
-           Description %in% cl_terms) %>%
+           Description %in% cur_cluster_terms_to_plot) %>%
     mutate(
       sig_label      = case_when(p.adjust < 0.001 ~ "***",
                                  p.adjust < 0.01  ~ "**",
@@ -315,45 +330,37 @@ build_supplementary_heatmap <- function(cl, data, ion_terms, h) {
                               levels = all_contrast_levels)
     )
 
-  nes_lim <- max(abs(heat_df$NES), na.rm = TRUE)
-
-  ggplot(heat_df, aes(x = contrast_label, y = Description, fill = NES)) +
-    geom_tile(color = "white", linewidth = 0.3) +
-    geom_text(aes(label = sig_label), size = 20, vjust = .8,
-              fontface = "bold", color = "black") +
-    scale_fill_distiller(palette = "RdBu", direction = -1,
-                         limits = c(-nes_lim, nes_lim), name = "NES",
-                         guide = guide_colorbar(barwidth = h * .2,
-                                                barheight = h * 1.3)) +
-    scale_x_discrete(labels = \(x) str_wrap(x, width = 14), drop = TRUE) +
-    scale_y_discrete(labels = \(x) str_wrap(x, width = 25)) +
-    labs(x = NULL, y = NULL,
-         title = cluster_labels[cl]) +
-    theme_minimal(base_family = "Helvetica", base_size = 40) +
-    theme(
-      axis.text.x    = element_text(angle = 45, vjust = 1, hjust = 1,
-                                    face = "bold", color = "black"),
-      axis.text.y    = element_text(face = "bold", color = "black", hjust = 1),
-      axis.title     = element_blank(),
-      panel.grid     = element_blank(),
-      plot.title     = element_text(face = "bold", size = 60, hjust = 0.5, vjust = 0),
-      legend.text    = element_text(size = 30, face = "bold"),
-      legend.title   = element_text(size = 40, face = "bold")
-    )
+  nes_lim <- max(abs(cur_plot_heatmap_data$NES), na.rm = TRUE)
+  
+  cur_supp_plot = ggplot(cur_plot_heatmap_data, aes(x = contrast_label, y = Description, fill = NES)) +
+      geom_tile(color = "white", linewidth = 0.3) +
+      geom_text(aes(label = sig_label), size = 30, vjust = .8,
+                fontface = "bold", color = "black") +
+      scale_fill_distiller(palette = "RdBu", direction = -1,
+                           limits = c(-nes_lim, nes_lim), name = "NES",
+                           guide = guide_colorbar(barwidth = h * .4,
+                                                  barheight = h * 1.8)) +
+      scale_x_discrete(labels = \(x) str_wrap(x, width = 14), drop = TRUE) +
+      scale_y_discrete(labels = \(x) str_wrap(x, width = 25)) +
+      labs(x = NULL, y = NULL,
+           title = cluster_labels[cur_cluster]) +
+      theme_minimal(base_family = "Helvetica", base_size = 45) +
+      theme(
+        axis.text.x    = element_text(angle = 45, vjust = 1.1, hjust = 1,
+                                      face = "bold", color = "black"),
+        axis.text.y    = element_text(face = "bold", color = "black", hjust = 1),
+        axis.title     = element_blank(),
+        panel.grid     = element_blank(),
+        plot.title     = element_text(face = "bold", size = 100, hjust = 0.5, vjust = 0),
+        legend.text    = element_text(size = 50, face = "bold"),
+        legend.title   = element_text(size = 60, face = "bold")
+      )
+  
+  plot_list_supp[[cur_cluster]] = cur_supp_plot
+  
 }
 
-# ── Save one supplementary heatmap for all
-supp_plots =  map(cell_order, function(cl) {
+combined_supp <- wrap_plots(plot_list_supp, ncol = 2,heights = c(4,4,6,2))
 
-  n_terms <- ion_terms_by_cluster %>% filter(cluster == cl) %>% nrow()
-
-  # 12 contrasts on x-axis; height scales with term count
-  h <- 3 + n_terms * 1.1
-
-  build_supplementary_heatmap(cl, glial_gsea_results, ion_terms_by_cluster, h)
-})
-
-combined_supp <- wrap_plots(supp_plots, ncol = 2)
-
-ggsave("combined_supp_ion.pdf",combined_supp, width = 80, height = 90, limitsize = F)
+ggsave("combined_supp_ion.pdf",combined_supp, width = 80, height = 80, limitsize = F)
 ```

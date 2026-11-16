@@ -150,12 +150,12 @@ all_sig = all_sig %>% select(cluster_key, contrast) %>% distinct()
 all_sig$sig = T
 ```
 
-Now plot
+Plot
 ```{r}
 library(patchwork)
 df_internal_and_official_name = read_csv("../shared objs and code/internal_to_official_name_conversions_neuronal.csv")
 
-# --- 1. fill = sccomp effect; star = consensus criterion ---
+#color/fill = sccomp effect size estimate, * = significant or not (in 2/3 methods)
 plot_data <- sccomp_results %>%
   dplyr::filter(grepl("^strain", parameter)) %>%
   dplyr::transmute(
@@ -172,7 +172,7 @@ plot_data <- sccomp_results %>%
   ) %>%
   dplyr::mutate(is_significant = !is.na(sig))
 
-# --- 2. relabel clusters, order classes with neuronal last ---
+#relabel clusters with neuronal last one
 plot_data_heatmap <- plot_data %>%
   dplyr::mutate(cluster = dplyr::if_else(cell_class == "neuronal",
                                          sub("^cluster_neuronal-", "", cluster),
@@ -183,16 +183,27 @@ plot_data_heatmap <- plot_data %>%
     cluster  = dplyr::if_else(cell_class == "neuronal",
                               dplyr::coalesce(official, cluster), cluster)
   ) %>%
-  dplyr::select(-official) %>%
+  dplyr::select(-official) %>% #mutate names to be consistent with other figures
+  dplyr::mutate(cell_class = case_when(
+    cell_class == "neuronal" ~ "Neuronal",
+    cell_class == "ependymal" ~ "Ependymal",
+    cell_class == "microglia" ~ "Microglia",
+    cell_class == "opc" ~ "OPC",
+    cell_class == "olig" ~ "Olig",
+    cell_class == "tanycyte" ~ "Tanycyte",
+    cell_class == "vascular" ~ "Vascular",
+    cell_class == "astrocyte" ~ "Astrocyte",
+    .default = cell_class
+  )) %>% 
   dplyr::mutate(cell_class = factor(cell_class, levels = c(
-    sort(setdiff(unique(.$cell_class), "neuronal")), "neuronal"))) %>%
-  dplyr::arrange(cell_class, cluster) %>%
+    sort(setdiff(unique(.$cell_class), "Neuronal")), "Neuronal"))) %>% #sort alphabetically except neuronal is last class
+  dplyr::arrange(cell_class, cluster)  %>% 
   dplyr::mutate(cluster = factor(cluster, levels = unique(.$cluster)))
 
 plot_data_non_neuronal <- plot_data_heatmap %>%
-  dplyr::filter(cell_class != "neuronal") %>% droplevels()
+  dplyr::filter(cell_class != "Neuronal") %>% droplevels()
 plot_data_neuronal <- plot_data_heatmap %>%
-  dplyr::filter(cell_class == "neuronal") %>% droplevels()
+  dplyr::filter(cell_class == "Neuronal") %>% droplevels()
 
 max_abs_effect <- max(abs(plot_data_heatmap$c_effect), na.rm = TRUE)
 color_limits   <- c(-max_abs_effect, max_abs_effect)
@@ -200,8 +211,7 @@ color_limits   <- c(-max_abs_effect, max_abs_effect)
 
 
 ```{r}
-# --- 3. one builder, two panels ---
-make_panel <- function(df, title, ylab) {
+make_panel <- function(df, title) {
   ggplot(df, aes(x = strain, y = cluster, fill = c_effect)) +
     geom_tile(color = "grey50", linewidth = 0.4) +
     geom_text(data = ~ dplyr::filter(.x, is_significant),
@@ -210,25 +220,30 @@ make_panel <- function(df, title, ylab) {
     scale_fill_gradient2(name = "Logit-fold change (sccomp)",
                          low = "#0571b0", mid = "white", high = "#ca0020",
                          midpoint = 0, limits = color_limits) +
-    labs(title = title, y = ylab, x = "Strain (vs. B6)") +
+    labs(title = title, y = "", x = "Strain (vs. B6)") +
     theme_classic(base_size = 12) +
     theme(
       axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10, face = "bold"),
-      axis.text.y = element_text(size = 9),
+      axis.text.y = element_text(size = 10),
+      axis.title.x = element_text(size = 15, face = "bold"),
       strip.text.y.left = element_text(face = "bold", angle = 0),
       panel.spacing.y = unit(0.5, "lines"),
-      plot.title = element_text(face = "bold", hjust = 0.5),
-      plot.title.position = "plot"
+      plot.title = element_text(face = "bold", hjust = .5, size = 15),
+      plot.title.position = "plot",
+      legend.key.size = unit(2,"cm"),
+      legend.text = element_text(size = 15, face = "bold"),
+      legend.title = element_text(size = 20, face = "bold"),
     )
 }
 
 combined_plot <-
-  (make_panel(plot_data_non_neuronal, "Non-Neuronal Clusters", "Cluster") +
-   make_panel(plot_data_neuronal,     "Neuronal Clusters",     "")) +
+  (make_panel(plot_data_non_neuronal, "Non-Neuronal Clusters") +
+   make_panel(plot_data_neuronal,     "Neuronal Clusters")) +
   plot_layout(guides = "collect") +
   plot_annotation(caption = paste0(
     "* = consistent direction and FDR < ", FDR_CUT,
-    " in \u2265 2 of 3 methods (sccomp, voomCLR, ANCOM-BC2). Fill shows the sccomp estimate.")) &
+    " in \u2265 2 of 3 methods (sccomp, voomCLR, or ANCOM-BC2). Fill = sccomp effect size estimate."),
+    theme = theme(plot.caption =  element_text(size = 15))) &
   theme(legend.position = "bottom")
 
 ggsave("consensus_strain_comparisons_vs_b6.pdf", combined_plot, width = 18, height = 20)

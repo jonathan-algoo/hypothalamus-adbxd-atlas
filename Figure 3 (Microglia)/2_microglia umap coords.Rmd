@@ -137,13 +137,4 @@ cluster_centers <- umap_coords %>%
 
 
 saveRDS(cluster_centers, "microglia_umap_cluster_centers.rds")
-
-
-
-umap_plot = ggplot(umap_coords, aes(x = UMAP1,  y = UMAP2)) +
-    geom_point(aes(fill = cluster, color = cluster), size = .5) +
-    geom_text(data = cluster_centers, aes(x = UMAP1_center, y = UMAP2_center, label = cluster), color = "black") +
-    theme_classic()
-
-ggsave("microglia_cluster_coords.pdf", umap_plot, device = "pdf", width = 10, height = 10) 
 ```

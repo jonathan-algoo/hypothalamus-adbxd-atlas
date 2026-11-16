@@ -219,8 +219,8 @@ tanycyte_plot <- create_marker_dotplot(
 
 
 vascular_rename <- c(
-  "Vascular-Endothelial_1" = "Endothelial-1 (*Cav1*/*Ctla2a* Arteries)", 
-  "Vascular-Endothelial_2" = "Endothelial-2 (*Gkn3* Veins)",
+  "Vascular-Endothelial_1" = "Endothelial-1 (*Cav1*/*Ctla2a* Veins)", 
+  "Vascular-Endothelial_2" = "Endothelial-2 (*Gkn3* Arteries)",
   "Vascular-Endothelial_3" = "Endothelial-3 (*Plvap*/*Col15a1*/*Exoc3l2* Fenestrated)",
   "Vascular-Pericytes"     = "Pericytes (*Rgs5*/*Kcnj8*)",
   "Vascular-Smc"           = "SMC (*Myh11*/*Acta2*)"
@@ -241,7 +241,7 @@ vascular_plot <- create_marker_dotplot(
 ###############################################################################
 library(patchwork)
 
-composite <- (vlmc_plot / ependymal_plot / tanycyte_plot / vascular_plot) +
+composite <- (vlmc_plot  / tanycyte_plot / ependymal_plot/ vascular_plot) +
   plot_annotation(tag_levels = "A") &
   theme(plot.tag = element_text(face = "bold", size = 40))
 
